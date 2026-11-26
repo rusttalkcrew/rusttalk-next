@@ -16,6 +16,7 @@ Unreleased under the new version and date.
 - On phones, tapping a message no longer shows the desktop toolbar; press and hold a message to open its menu with react, reply, copy and delete.
 - Large phone photos sent without a preview now show in albums and the gallery too, and right-clicking (or long-pressing) a picture in the viewer lets you copy or save it.
 - The member list now shows people who are online first in each group, then Do not disturb, Away and offline, by name within each.
+- The sticker and emoji picker has a row of tabs (recent stickers and one per pack) over a grid of four large stickers, and animated stickers and emoji play all the time. On phones it opens in place of the keyboard, and a tapped sticker shows large above the message box first: tap it again or press send to send it.
 
 ## v0.8.1 - 2026-11-26
 

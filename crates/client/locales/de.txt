@@ -1167,6 +1167,8 @@ picker.favourite = Zu Favoriten hinzufügen
 picker.unfavourite = Aus Favoriten entfernen
 picker.favourite_tip = Rechtsklick auf ein Emoji fügt es zu deinen Favoriten hinzu.
 picker.sticker_tip = Wähle einen Sticker, um ihn sofort zu senden.
+picker.send_sticker = {name} senden
+picker.close_preview = Vorschau schließen
 picker.from_server = Server
 
 # crates/client/src/files.rs

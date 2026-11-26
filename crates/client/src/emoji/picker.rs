@@ -1,5 +1,7 @@
-//! The picker panel over the composer: tabs for stickers and emoji, a search, a rail of
-//! sections, and the hovered emoji's name at the bottom.
+//! The picker over the composer: Stickers and Emoji, a search, a row of tabs (recent,
+//! favourites, one per pack) and a grid. On a desktop it is a popover and a click sends;
+//! on a phone it is docked under the composer in place of the keyboard, and a tapped
+//! sticker shows large above the composer first, so a mis-tap sends nothing.
 
 use std::{
     collections::HashSet,
@@ -7,47 +9,90 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Align2, FontId, Layout, Margin, PointerButton, Rect, Response, ScrollArea, Sense,
-    TextBuffer as _, TextEdit, Ui, UiBuilder, Vec2,
+    self, Align, Align2, FontId, Frame, Layout, Margin, PointerButton, Rect, Response, ScrollArea,
+    Sense, Stroke, TextBuffer as _, TextEdit, Ui, UiBuilder, Vec2,
     text::{CCursor, CCursorRange},
 };
-use rusttalk_core::client::save_json;
+use rusttalk_core::{
+    auth::{decode, encode},
+    client::save_json,
+};
 
 use super::{PICKER, SHORTCODES, matching, shortcode_char, sprite, text};
 use crate::{
-    server::{CustomEmoji, Directory, Id},
+    server::{CustomEmoji, Directory, Id, Picture},
     ui,
 };
 
 pub const RECENT_FILE: &str = "emoji-recent.json";
 pub const FAVOURITES_FILE: &str = "emoji-favourites.json";
+pub const STICKER_RECENT_FILE: &str = "sticker-recent.json";
 const RECENT_LIMIT: usize = 32;
 const FAVOURITES_LIMIT: usize = 64;
-const COLUMNS: usize = 9;
+/// Four rows of the sticker grid.
+const STICKER_RECENT_LIMIT: usize = 16;
+const COLUMNS: usize = 10;
 const CELL: f32 = 36.0;
 const STICKER_COLUMNS: usize = 4;
 const STICKER_CELL: f32 = 92.0;
 /// The section headers in the emoji grid.
 const HEADER: f32 = 28.0;
-const RAIL: f32 = 44.0;
 const BODY: f32 = 300.0;
 const PADDING: f32 = 12.0;
+/// The panel's side padding and room for the grid's scroll bar.
+const INSET: f32 = 2.0 * PADDING + 4.0;
+/// A sticker tapped on a phone, shown above the composer.
+const PREVIEW: f32 = 140.0;
 
-/// The rail, a grid `columns` wide and room for its scroll bar.
-fn width(columns: usize) -> f32 {
-    RAIL + columns as f32 * CELL + 2.0 * PADDING + 4.0
+/// Phones and touch screens: the picker docks under the composer in place of the
+/// keyboard, and a sticker is previewed before it is sent.
+pub fn docked(ctx: &egui::Context) -> bool {
+    ui::TOUCH || ui::is_phone(ctx)
 }
 
-/// Emoji columns that fit the window: all of them, or fewer on a phone.
-fn columns(ctx: &egui::Context) -> usize {
-    let room = ui::fit(ctx, width(COLUMNS)) - width(0);
-    ((room / CELL).floor() as usize).clamp(5, COLUMNS)
+/// The picker's sizes this frame.
+struct Metrics {
+    docked: bool,
+    width: f32,
+    /// The grid's height.
+    body: f32,
+    cell: f32,
+    columns: usize,
+    sticker_cell: f32,
 }
 
-/// Sticker columns in the same width as the emoji.
-fn sticker_columns(ctx: &egui::Context) -> usize {
-    let room = width(columns(ctx)) - 2.0 * PADDING - 4.0;
-    ((room / STICKER_CELL).floor() as usize).clamp(2, STICKER_COLUMNS)
+impl Metrics {
+    /// A popover as wide as four stickers, or docked across `docked` points.
+    fn new(ctx: &egui::Context, docked: Option<f32>) -> Self {
+        let width =
+            docked.unwrap_or_else(|| ui::fit(ctx, STICKER_COLUMNS as f32 * STICKER_CELL + INSET));
+        let inner = (width - INSET).max(CELL);
+        // Fingers need bigger emoji; the panel takes about a keyboard's height.
+        let (cell, body) = match docked {
+            Some(_) => (
+                ui::TOUCH_TARGET,
+                (ctx.content_rect().height() * 0.28).clamp(160.0, 300.0),
+            ),
+            None => (CELL, BODY),
+        };
+        Self {
+            docked: docked.is_some(),
+            width,
+            body,
+            cell,
+            columns: ((inner / cell).floor() as usize).clamp(1, COLUMNS),
+            sticker_cell: (inner / STICKER_COLUMNS as f32).floor(),
+        }
+    }
+
+    /// The tab buttons.
+    fn tab(&self) -> f32 {
+        if self.docked {
+            ui::TOUCH_TARGET
+        } else {
+            ui::ICON_BUTTON
+        }
+    }
 }
 
 /// The picker's tabs, each opened by its own composer button.
@@ -66,12 +111,12 @@ impl Tab {
     }
 }
 
-/// A group of emoji with a header, and its place on the rail.
+/// A group of emoji or stickers, and its tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Section {
     Favourites,
     Recent,
-    /// One pack of server emoji, by its place among the packs shown.
+    /// One pack of server emoji or stickers, by its place among the packs shown.
     Pack(usize),
     Unicode(u8),
     /// Search results, without a header.
@@ -165,6 +210,20 @@ struct PackItems<'a> {
     items: Vec<&'a CustomEmoji>,
 }
 
+/// One sticker tab: its stickers, each with whether it is another server's.
+struct Stickers<'a> {
+    section: Section,
+    title: String,
+    items: Vec<(&'a CustomEmoji, bool)>,
+}
+
+/// A tab in the row across the top, drawn with a pack's first picture if it has one.
+struct TabButton<'a> {
+    section: Section,
+    title: &'a str,
+    picture: Option<&'a Picture>,
+}
+
 /// The server emoji the picker offers: this server's, which go into the text by ID, and
 /// other servers', which go along as files. In a DM nothing is this server's.
 pub struct Scope<'a> {
@@ -218,6 +277,13 @@ impl<'a> Scope<'a> {
             .chain(self.others.iter().map(|(_, dir)| *dir))
             .flat_map(|dir| dir.emoji.iter())
     }
+
+    /// An emoji or sticker by ID, and whether it is another server's.
+    fn find(&self, id: &Id) -> Option<(&'a CustomEmoji, bool)> {
+        let local = (self.local.into_iter()).flat_map(|dir| dir.emoji.iter().map(|e| (e, false)));
+        let others = (self.others.iter()).flat_map(|(_, dir)| dir.emoji.iter().map(|e| (e, true)));
+        local.chain(others).find(|(emoji, _)| emoji.id == *id)
+    }
 }
 
 /// What picking a server emoji or sticker means: text or a sticker of this server, or a
@@ -249,20 +315,28 @@ pub struct Picker {
     data: PathBuf,
     recent: Vec<String>,
     favourites: Vec<String>,
+    /// Stickers sent from the picker, newest first, by encoded ID.
+    sticker_recent: Vec<String>,
     open: bool,
     tab: Tab,
     query: String,
     tone: usize,
-    /// The section the rail asked for, scrolled to on the next frame.
+    /// The section a tab asked for, scrolled to on the next frame.
     jump: Option<Section>,
-    /// The section at the top of the grid, lit on the rail.
+    /// The section at the top of the emoji grid, lit in the tabs.
     current: Option<Section>,
+    /// The sticker tab shown.
+    sticker_tab: Option<Section>,
+    /// The tab lit last frame, to bring a newly lit one into view.
+    lit: Option<Section>,
     hover: Option<Hover>,
     focus_search: bool,
     pressed_cursor: Option<CCursorRange>,
     insert_at: Option<CCursorRange>,
     /// Opened to pick a reaction: emoji only.
     reaction: bool,
+    /// Docked: the sticker tapped, shown large above the composer until sent or put away.
+    preview: Option<Id>,
 }
 
 fn load(path: &Path) -> Vec<String> {
@@ -279,26 +353,40 @@ fn load(path: &Path) -> Vec<String> {
 
 impl Picker {
     pub fn new(data: &Path) -> Self {
+        let sticker_recent = crate::load_json::<Vec<String>>(&data.join(STICKER_RECENT_FILE))
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "reading recent stickers failed");
+                Vec::new()
+            });
         Self {
             data: data.to_owned(),
             recent: load(&data.join(RECENT_FILE)),
             favourites: load(&data.join(FAVOURITES_FILE)),
+            sticker_recent,
             open: false,
             tab: Tab::Emoji,
             query: String::new(),
             tone: 0,
             jump: None,
             current: None,
+            sticker_tab: None,
+            lit: None,
             hover: None,
             focus_search: false,
             pressed_cursor: None,
             insert_at: None,
             reaction: false,
+            preview: None,
         }
     }
 
     pub fn is_open(&self, tab: Tab) -> bool {
         self.open && self.tab == tab
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.preview = None;
     }
 
     pub fn remember(&mut self, sequence: &str) {
@@ -326,6 +414,19 @@ impl Picker {
         }
     }
 
+    /// Pick a server emoji or sticker; a sticker becomes the newest recent one.
+    fn pick(&mut self, emoji: &CustomEmoji, foreign: bool) -> Picked {
+        if emoji.sticker {
+            promote(
+                &mut self.sticker_recent,
+                &encode(&emoji.id),
+                STICKER_RECENT_LIMIT,
+            );
+            self.store(STICKER_RECENT_FILE, &self.sticker_recent);
+        }
+        pick_custom(emoji, foreign)
+    }
+
     /// A composer button that opens the panel on `tab`, or closes it when it is open there.
     /// Call after `show`, which closes the panel on a click outside it.
     pub fn button(&mut self, response: &Response, tab: Tab, editor: egui::Id, was_open: bool) {
@@ -343,7 +444,7 @@ impl Picker {
         }
         let pressed = self.pressed_cursor.take();
         if was_open && self.tab == tab {
-            self.open = false;
+            self.close();
             return;
         }
         self.insert_at = if response.clicked_by(PointerButton::Primary) {
@@ -351,9 +452,16 @@ impl Picker {
         } else {
             cursor()
         };
+        // Docked, the panel takes the keyboard's place.
+        if docked(&response.ctx) {
+            response
+                .ctx
+                .memory_mut(|memory| memory.surrender_focus(editor));
+        }
         self.open = true;
         self.reaction = false;
         self.tab = tab;
+        self.preview = None;
         self.query.clear();
         self.hover = None;
         self.focus_search = true;
@@ -373,33 +481,128 @@ impl Picker {
         self.hover = None;
         self.focus_search = true;
         self.insert_at = None;
+        self.preview = None;
     }
 
-    /// The panel above `anchor` while open. Returns whether it was open before this
-    /// frame, for `button`, and what was picked.
-    pub fn show(&mut self, ui: &Ui, anchor: Rect, scope: &Scope) -> (bool, Option<Picked>) {
+    /// The panel while open: above `anchor` on a desktop, or here (under the composer)
+    /// when docked. Returns whether it was open before this frame, for `button`, and
+    /// what was picked.
+    pub fn show(&mut self, ui: &mut Ui, anchor: Rect, scope: &Scope) -> (bool, Option<Picked>) {
         let was_open = self.open;
-        let mut open = self.open;
-        let picked = ui::panel_popup(ui, egui::Id::unique("picker"), anchor, &mut open, |ui| {
-            ui.set_width(width(columns(ui.ctx())));
-            self.panel(ui, scope)
-        })
-        .flatten();
-        self.open = open && picked.is_none();
+        let picked = if !docked(ui.ctx()) {
+            let metrics = Metrics::new(ui.ctx(), None);
+            let mut open = self.open;
+            let id = egui::Id::unique("picker");
+            let picked = ui::panel_popup(ui, id, anchor, &mut open, |ui| {
+                ui.set_width(metrics.width);
+                self.panel(ui, scope, &metrics)
+            })
+            .flatten();
+            self.open = open && picked.is_none();
+            picked
+        } else if self.open {
+            ui.add_space(ui::SPACE_S);
+            // Less the frame's border on each side.
+            let metrics = Metrics::new(ui.ctx(), Some(ui.available_width() - 2.0));
+            let c = ui::colors(ui);
+            let picked = Frame::new()
+                .fill(c.raised)
+                .stroke(Stroke::new(1.0, c.border))
+                .corner_radius(ui::RADIUS_WINDOW)
+                .show(ui, |ui| self.panel(ui, scope, &metrics))
+                .inner;
+            // It stays open for the next one, as a keyboard would; a reaction is one.
+            if picked.is_some() && self.reaction {
+                self.close();
+            }
+            picked
+        } else {
+            None
+        };
+        if !self.open {
+            self.preview = None;
+        }
         if let Some(Picked::Text(sequence)) = &picked {
             self.remember(sequence);
         }
         (was_open, picked)
     }
 
-    fn panel(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
+    /// Docked: whether a sticker waits above the composer, which Send then sends.
+    pub fn has_preview(&self) -> bool {
+        self.open && self.preview.is_some()
+    }
+
+    /// The sticker waiting above the composer, to send it.
+    pub fn send_preview(&mut self, scope: &Scope) -> Option<Picked> {
+        let id = self.preview.take().filter(|_| self.open)?;
+        let (emoji, foreign) = scope.find(&id)?;
+        Some(self.pick(emoji, foreign))
+    }
+
+    /// Docked: the tapped sticker large, above the composer, with a ×. Tapping it sends
+    /// it: returns it then.
+    pub fn preview(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
+        let id = self.preview.filter(|_| self.open)?;
+        let Some((emoji, foreign)) = scope.find(&id) else {
+            self.preview = None;
+            return None;
+        };
+        let (row, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), PREVIEW + 2.0 * ui::SPACE_S),
+            Sense::hover(),
+        );
+        let spot = Rect::from_center_size(row.center(), Vec2::splat(PREVIEW));
+        let card = spot.expand(ui::SPACE_S);
+        let c = ui::colors(ui);
+        ui.painter().rect(
+            card,
+            ui::RADIUS_WINDOW,
+            c.raised,
+            Stroke::new(1.0, c.border),
+            egui::StrokeKind::Inside,
+        );
+        let label = t!("picker.send_sticker", name = format!(":{}:", emoji.name));
+        let response = ui.interact(spot, egui::Id::unique("sticker preview"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        match &emoji.picture {
+            Some(picture) => crate::home::paint_live(ui, spot, picture, 0.0),
+            None => {
+                ui.painter().text(
+                    spot.center(),
+                    Align2::CENTER_CENTER,
+                    format!(":{}:", emoji.name),
+                    FontId::proportional(ui::TEXT_BODY),
+                    c.muted,
+                );
+            }
+        }
+        let close = Rect::from_min_size(
+            card.right_top() + Vec2::new(-22.0 - ui::SPACE_XS, ui::SPACE_XS),
+            Vec2::splat(22.0),
+        );
+        // A child, so the × leaves the composer's layout alone.
+        let mut corner = ui.new_child(UiBuilder::new().max_rect(close));
+        if ui::small_close(&mut corner, t!("picker.close_preview")).clicked() {
+            self.preview = None;
+            return None;
+        }
+        if !response.clicked() {
+            return None;
+        }
+        self.preview = None;
+        Some(self.pick(emoji, foreign))
+    }
+
+    fn panel(&mut self, ui: &mut Ui, scope: &Scope, m: &Metrics) -> Option<Picked> {
         ui.spacing_mut().item_spacing = Vec2::splat(ui::SPACE_S);
-        egui::Frame::new()
+        Frame::new()
             .inner_margin(Margin {
                 bottom: ui::SPACE_S as i8,
                 ..Margin::same(PADDING as i8)
             })
             .show(ui, |ui| {
+                ui.set_width(m.width - 2.0 * PADDING);
                 ui.horizontal(|ui| {
                     // A reaction is an emoji, so picking one shows no sticker tab.
                     let tabs: &[Tab] = if self.reaction {
@@ -412,6 +615,7 @@ impl Picker {
                             && self.tab != tab
                         {
                             self.tab = tab;
+                            self.preview = None;
                             self.query.clear();
                             self.hover = None;
                             self.focus_search = true;
@@ -430,7 +634,8 @@ impl Picker {
                             .hint_text(hint)
                             .desired_width(width),
                     );
-                    if std::mem::take(&mut self.focus_search) {
+                    // Docked, a focused search box would bring the keyboard back up.
+                    if std::mem::take(&mut self.focus_search) && !m.docked {
                         search.request_focus();
                     }
                     if search.changed() {
@@ -441,31 +646,18 @@ impl Picker {
                     }
                 });
             });
-        let c = ui::colors(ui);
-        let line = |ui: &Ui, y: f32| {
-            let rect = ui.max_rect();
-            ui.painter()
-                .hline(rect.x_range(), y, egui::Stroke::new(1.0, c.border));
+        line(ui, ui.cursor().top());
+        let picked = match self.tab {
+            Tab::Emoji => self.emoji(ui, scope, m),
+            Tab::Stickers => self.stickers(ui, scope, m),
         };
-        line(ui, ui.cursor().top());
-        let picked = ui
-            .allocate_ui_with_layout(
-                Vec2::new(width(columns(ui.ctx())), BODY),
-                Layout::left_to_right(Align::Min),
-                |ui| {
-                    ui.set_height(BODY);
-                    ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    // Tiles are exactly a cell; the emoji fills it without padding.
-                    ui.spacing_mut().button_padding = Vec2::ZERO;
-                    match self.tab {
-                        Tab::Emoji => self.emoji(ui, scope),
-                        Tab::Stickers => self.stickers(ui, scope),
-                    }
-                },
-            )
-            .inner;
-        line(ui, ui.cursor().top());
-        self.bar(ui, scope);
+        // Nothing is hovered on a touch screen.
+        if m.docked {
+            ui.add_space(ui::SPACE_XS);
+        } else {
+            line(ui, ui.cursor().top());
+            self.bar(ui, scope, m);
+        }
         picked
     }
 
@@ -483,7 +675,60 @@ impl Picker {
         }
     }
 
-    fn emoji(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
+    /// The row of tabs across the top; returns the one clicked.
+    fn tabs(
+        &mut self,
+        ui: &mut Ui,
+        m: &Metrics,
+        tabs: &[TabButton],
+        lit: Section,
+    ) -> Option<Section> {
+        let size = m.tab();
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(m.width, size + 2.0 * ui::SPACE_XS),
+            Sense::hover(),
+        );
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect.shrink2(Vec2::new(PADDING, ui::SPACE_XS)))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let newly_lit = self.lit != Some(lit);
+        self.lit = Some(lit);
+        let mut clicked = None;
+        ScrollArea::horizontal()
+            .id_salt(("picker-tabs", self.tab == Tab::Emoji))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(&mut child, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for tab in tabs {
+                    let on = tab.section == lit;
+                    let look = if on { ui::Look::Plain } else { ui::Look::Ghost };
+                    let icon = if tab.picture.is_some() {
+                        ""
+                    } else {
+                        tab.section.icon()
+                    };
+                    let response = ui::icon_button(ui, icon, tab.title, look, Vec2::splat(size));
+                    if let Some(picture) = tab.picture {
+                        let inner = Rect::from_center_size(
+                            response.rect.center(),
+                            Vec2::splat(size - 10.0),
+                        );
+                        crate::home::paint_live(ui, inner, picture, 4.0);
+                    }
+                    if on && newly_lit {
+                        response.scroll_to_me(None);
+                    }
+                    if response.clicked() {
+                        clicked = Some(tab.section);
+                    }
+                }
+            });
+        clicked
+    }
+
+    fn emoji(&mut self, ui: &mut Ui, scope: &Scope, m: &Metrics) -> Option<Picked> {
         let saved = Saved {
             favourites: self.favourites.clone(),
             recent: self.recent.clone(),
@@ -492,174 +737,178 @@ impl Picker {
         };
         let groups = saved.groups(scope);
         let searching = !self.query.trim().is_empty();
-        if !searching {
-            self.rail(ui, &groups);
-        }
-        if groups.iter().all(|group| group.items.is_empty()) {
-            ui.add_space(PADDING);
-            ui.vertical(|ui| {
-                ui.add_space(PADDING);
-                ui.label(t!("picker.none_found"));
-            });
-            return None;
-        }
-        let mut tops = Vec::with_capacity(groups.len());
-        let mut total = 0.0;
-        for group in &groups {
-            tops.push(total);
-            total += group.section.header()
-                + group.items.len().div_ceil(columns(ui.ctx())) as f32 * CELL;
-        }
-        let mut area = ScrollArea::vertical()
-            .id_salt(("picker-grid", searching))
-            .auto_shrink(false);
-        if let Some(at) = (self.jump.take())
-            .and_then(|section| groups.iter().position(|group| group.section == section))
-        {
-            area = area.vertical_scroll_offset(tops[at]);
-        }
-        let mut picked = None;
-        let mut favourite = None;
-        ui.add_space(ui::SPACE_XS);
-        area.show_viewport(ui, |ui, viewport| {
-            let origin = ui.max_rect().min;
-            ui.set_width(columns(ui.ctx()) as f32 * CELL);
-            ui.set_height(total);
-            for (group, top) in groups.iter().zip(&tops) {
-                let header = group.section.header();
-                let rows = group.items.len().div_ceil(columns(ui.ctx()));
-                if top + header + rows as f32 * CELL < viewport.min.y || *top > viewport.max.y {
-                    continue;
-                }
-                if header > 0.0 {
-                    let rect = Rect::from_min_size(
-                        origin + Vec2::new(4.0, *top),
-                        Vec2::new(columns(ui.ctx()) as f32 * CELL, header),
-                    );
-                    ui.painter().text(
-                        rect.left_center(),
-                        Align2::LEFT_CENTER,
-                        format!("{}  {}", group.section.icon(), group.title()),
-                        FontId::new(ui::TEXT_SMALL, ui::bold_family()),
-                        ui::colors(ui).muted,
-                    );
-                }
-                let first = ((viewport.min.y - top - header) / CELL).floor().max(0.0) as usize;
-                let last =
-                    (((viewport.max.y - top - header) / CELL).ceil().max(0.0) as usize).min(rows);
-                for row in first..last {
-                    let rect = Rect::from_min_size(
-                        origin + Vec2::new(0.0, top + header + row as f32 * CELL),
-                        Vec2::new(columns(ui.ctx()) as f32 * CELL, CELL),
-                    );
-                    let builder = UiBuilder::new()
-                        .max_rect(rect)
-                        .id_salt((group.section, row))
-                        .layout(Layout::left_to_right(Align::Center));
-                    ui.scope_builder(builder, |ui| {
-                        for item in group
-                            .items
-                            .iter()
-                            .skip(row * columns(ui.ctx()))
-                            .take(columns(ui.ctx()))
-                        {
-                            let (response, hover, choice) = match *item {
-                                Item::Unicode(sequence, label) => (
-                                    tile(ui, sequence, label),
-                                    Hover::Unicode(sequence.to_owned()),
-                                    Picked::Text(sequence.to_owned()),
-                                ),
-                                Item::Custom(emoji) | Item::Foreign(emoji) => (
-                                    picture_tile(ui, emoji, CELL),
-                                    Hover::Custom(emoji.id),
-                                    pick_custom(emoji, matches!(*item, Item::Foreign(_))),
-                                ),
-                            };
-                            if response.hovered() {
-                                self.hover = Some(hover);
-                            }
-                            if let Item::Unicode(sequence, _) = *item {
-                                let faved = self.favourites.iter().any(|f| f == sequence);
-                                ui::context_menu(&response, |m| {
-                                    let label = if faved {
-                                        t!("picker.unfavourite")
-                                    } else {
-                                        t!("picker.favourite")
-                                    };
-                                    if m.item("★", label).clicked() {
-                                        favourite = Some(sequence.to_owned());
-                                    }
-                                });
-                            }
-                            if response.clicked() {
-                                picked = Some(choice);
-                            }
-                        }
-                    });
-                }
-            }
-            self.current = (groups.iter().zip(&tops))
-                .rev()
-                .find(|(_, top)| **top <= viewport.min.y + 1.0)
-                .map(|(group, _)| group.section);
-        });
-        if let Some(sequence) = favourite {
-            self.toggle_favourite(&sequence);
-        }
-        picked
-    }
-
-    /// The sections down the left, each scrolling the grid to its header.
-    fn rail(&mut self, ui: &mut Ui, groups: &[Group]) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(RAIL, BODY), Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, ui::colors(ui).side);
-        let mut child = ui.new_child(
-            UiBuilder::new()
-                .max_rect(rect.shrink2(Vec2::new(4.0, 6.0)))
-                .layout(Layout::top_down(Align::Center)),
-        );
-        child.spacing_mut().item_spacing.y = 2.0;
-        ScrollArea::vertical()
-            .id_salt("picker-rail")
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(&mut child, |ui| {
-                for group in groups.iter().filter(|group| !group.items.is_empty()) {
-                    let section = group.section;
-                    let on = self.current == Some(section);
-                    let look = if on { ui::Look::Plain } else { ui::Look::Ghost };
-                    // A pack's first emoji stands for it on the rail.
-                    let picture = match (section, group.items.first()) {
+        if !searching && let Some(first) = groups.first() {
+            let tabs: Vec<_> = (groups.iter())
+                .map(|group| TabButton {
+                    section: group.section,
+                    title: group.title(),
+                    // A pack's first emoji stands for it.
+                    picture: match (group.section, group.items.first()) {
                         (Section::Pack(_), Some(Item::Custom(e) | Item::Foreign(e))) => {
                             e.picture.as_ref()
                         }
                         _ => None,
-                    };
-                    let icon = if picture.is_some() {
-                        ""
-                    } else {
-                        section.icon()
-                    };
-                    let size = Vec2::splat(ui::ICON_BUTTON);
-                    let response = ui::icon_button(ui, icon, group.title(), look, size);
-                    if let Some(picture) = picture {
-                        let inner =
-                            Rect::from_center_size(response.rect.center(), Vec2::splat(22.0));
-                        crate::home::paint_hovered(ui, inner, picture, 4.0);
+                    },
+                })
+                .collect();
+            let lit = self.current.unwrap_or(first.section);
+            if let Some(section) = self.tabs(ui, m, &tabs, lit) {
+                self.jump = Some(section);
+            }
+        }
+        let cell = m.cell;
+        let columns = m.columns;
+        body(ui, m, |ui| {
+            if groups.iter().all(|group| group.items.is_empty()) {
+                ui.add_space(PADDING);
+                ui.label(t!("picker.none_found"));
+                return None;
+            }
+            let mut tops = Vec::with_capacity(groups.len());
+            let mut total = 0.0;
+            for group in &groups {
+                tops.push(total);
+                total += group.section.header() + group.items.len().div_ceil(columns) as f32 * cell;
+            }
+            let mut area = ScrollArea::vertical()
+                .id_salt(("picker-grid", searching))
+                .auto_shrink(false);
+            if let Some(at) = (self.jump.take())
+                .and_then(|section| groups.iter().position(|group| group.section == section))
+            {
+                area = area.vertical_scroll_offset(tops[at]);
+            }
+            let mut picked = None;
+            let mut favourite = None;
+            area.show_viewport(ui, |ui, viewport| {
+                let origin = ui.max_rect().min;
+                ui.set_width(columns as f32 * cell);
+                ui.set_height(total);
+                for (group, top) in groups.iter().zip(&tops) {
+                    let header = group.section.header();
+                    let rows = group.items.len().div_ceil(columns);
+                    if top + header + rows as f32 * cell < viewport.min.y || *top > viewport.max.y {
+                        continue;
                     }
-                    if response.clicked() {
-                        self.jump = Some(section);
+                    if header > 0.0 {
+                        let rect = Rect::from_min_size(
+                            origin + Vec2::new(4.0, *top),
+                            Vec2::new(columns as f32 * cell, header),
+                        );
+                        ui.painter().text(
+                            rect.left_center(),
+                            Align2::LEFT_CENTER,
+                            format!("{}  {}", group.section.icon(), group.title()),
+                            FontId::new(ui::TEXT_SMALL, ui::bold_family()),
+                            ui::colors(ui).muted,
+                        );
+                    }
+                    // Only the rows in view are laid out, so only those play.
+                    let first = ((viewport.min.y - top - header) / cell).floor().max(0.0) as usize;
+                    let last = (((viewport.max.y - top - header) / cell).ceil().max(0.0) as usize)
+                        .min(rows);
+                    for row in first..last {
+                        let rect = Rect::from_min_size(
+                            origin + Vec2::new(0.0, top + header + row as f32 * cell),
+                            Vec2::new(columns as f32 * cell, cell),
+                        );
+                        let builder = UiBuilder::new()
+                            .max_rect(rect)
+                            .id_salt((group.section, row))
+                            .layout(Layout::left_to_right(Align::Center));
+                        ui.scope_builder(builder, |ui| {
+                            for item in group.items.iter().skip(row * columns).take(columns) {
+                                let (response, hover, choice) = match *item {
+                                    Item::Unicode(sequence, label) => (
+                                        tile(ui, sequence, label, cell),
+                                        Hover::Unicode(sequence.to_owned()),
+                                        Picked::Text(sequence.to_owned()),
+                                    ),
+                                    Item::Custom(emoji) | Item::Foreign(emoji) => (
+                                        picture_tile(ui, emoji, cell),
+                                        Hover::Custom(emoji.id),
+                                        pick_custom(emoji, matches!(*item, Item::Foreign(_))),
+                                    ),
+                                };
+                                if response.hovered() {
+                                    self.hover = Some(hover);
+                                }
+                                if let Item::Unicode(sequence, _) = *item {
+                                    let faved = self.favourites.iter().any(|f| f == sequence);
+                                    ui::context_menu(&response, |m| {
+                                        let label = if faved {
+                                            t!("picker.unfavourite")
+                                        } else {
+                                            t!("picker.favourite")
+                                        };
+                                        if m.item("★", label).clicked() {
+                                            favourite = Some(sequence.to_owned());
+                                        }
+                                    });
+                                }
+                                if response.clicked() {
+                                    picked = Some(choice);
+                                }
+                            }
+                        });
                     }
                 }
+                self.current = (groups.iter().zip(&tops))
+                    .rev()
+                    .find(|(_, top)| **top <= viewport.min.y + 1.0)
+                    .map(|(group, _)| group.section);
             });
+            if let Some(sequence) = favourite {
+                self.toggle_favourite(&sequence);
+            }
+            picked
+        })
     }
 
-    fn stickers(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
+    /// The sticker tabs: recent ones, then one per pack; or what a search found.
+    fn sticker_groups<'a>(&self, scope: &Scope<'a>, query: &str) -> Vec<Stickers<'a>> {
+        let packs = scope.packs(true, query);
+        let mark = |pack: &PackItems<'a>| -> Vec<(&'a CustomEmoji, bool)> {
+            pack.items.iter().map(|e| (*e, pack.foreign)).collect()
+        };
+        if !query.is_empty() {
+            let items: Vec<_> = packs.iter().flat_map(mark).collect();
+            return (!items.is_empty())
+                .then(|| Stickers {
+                    section: Section::Found,
+                    title: String::new(),
+                    items,
+                })
+                .into_iter()
+                .collect();
+        }
+        let recent: Vec<_> = (self.sticker_recent.iter())
+            .filter_map(|id| scope.find(&decode(id).ok()?))
+            .filter(|(emoji, _)| emoji.sticker)
+            .collect();
+        let recent = (!recent.is_empty()).then(|| Stickers {
+            section: Section::Recent,
+            title: Section::Recent.title().to_owned(),
+            items: recent,
+        });
+        recent
+            .into_iter()
+            .chain(packs.iter().enumerate().map(|(at, pack)| Stickers {
+                section: Section::Pack(at),
+                title: pack.title.clone(),
+                items: mark(pack),
+            }))
+            .collect()
+    }
+
+    fn stickers(&mut self, ui: &mut Ui, scope: &Scope, m: &Metrics) -> Option<Picked> {
         let query = self.query.trim().trim_matches(':').to_lowercase();
-        let packs = scope.packs(true, &query);
-        ui.add_space(PADDING);
-        if packs.is_empty() {
-            ui.vertical(|ui| {
+        let groups = self.sticker_groups(scope, &query);
+        let shown = (self.sticker_tab)
+            .filter(|section| groups.iter().any(|group| group.section == *section))
+            .or(groups.first().map(|group| group.section));
+        let Some(mut shown) = shown else {
+            body(ui, m, |ui| {
                 ui.add_space(PADDING);
                 ui.label(if scope.packs(true, "").is_empty() {
                     t!("picker.no_stickers")
@@ -668,84 +917,75 @@ impl Picker {
                 });
             });
             return None;
+        };
+        if query.is_empty() {
+            let tabs: Vec<_> = (groups.iter())
+                .map(|group| TabButton {
+                    section: group.section,
+                    title: &group.title,
+                    picture: match group.section {
+                        Section::Pack(_) => {
+                            group.items.first().and_then(|(e, _)| e.picture.as_ref())
+                        }
+                        _ => None,
+                    },
+                })
+                .collect();
+            if let Some(section) = self.tabs(ui, m, &tabs, shown) {
+                self.sticker_tab = Some(section);
+                shown = section;
+            }
         }
-        let mut tops = Vec::with_capacity(packs.len());
-        let mut total = 0.0;
-        for pack in &packs {
-            tops.push(total);
-            total +=
-                HEADER + pack.items.len().div_ceil(sticker_columns(ui.ctx())) as f32 * STICKER_CELL;
-        }
-        let mut picked = None;
-        ui.vertical(|ui| {
-            ui.add_space(ui::SPACE_XS);
+        let items = &(groups.iter().find(|group| group.section == shown))?.items;
+        let cell = m.sticker_cell;
+        let rows = items.len().div_ceil(STICKER_COLUMNS);
+        let mut tapped = None;
+        body(ui, m, |ui| {
             ScrollArea::vertical()
-                .id_salt("picker-stickers")
+                .id_salt(("picker-stickers", shown))
                 .auto_shrink(false)
                 .show_viewport(ui, |ui, viewport| {
                     let origin = ui.max_rect().min;
-                    ui.set_width(sticker_columns(ui.ctx()) as f32 * STICKER_CELL);
-                    ui.set_height(total);
-                    for (pack, top) in packs.iter().zip(&tops) {
-                        let rows = pack.items.len().div_ceil(sticker_columns(ui.ctx()));
-                        let height = HEADER + rows as f32 * STICKER_CELL;
-                        if top + height < viewport.min.y || *top > viewport.max.y {
-                            continue;
-                        }
+                    ui.set_width(STICKER_COLUMNS as f32 * cell);
+                    ui.set_height(rows as f32 * cell);
+                    // Only the rows in view are laid out, so only those play.
+                    let first = (viewport.min.y / cell).floor().max(0.0) as usize;
+                    let last = ((viewport.max.y / cell).ceil().max(0.0) as usize).min(rows);
+                    for row in first..last {
                         let rect = Rect::from_min_size(
-                            origin + Vec2::new(4.0, *top),
-                            Vec2::new(sticker_columns(ui.ctx()) as f32 * STICKER_CELL, HEADER),
+                            origin + Vec2::new(0.0, row as f32 * cell),
+                            Vec2::new(STICKER_COLUMNS as f32 * cell, cell),
                         );
-                        ui.painter().text(
-                            rect.left_center(),
-                            Align2::LEFT_CENTER,
-                            &pack.title,
-                            FontId::new(ui::TEXT_SMALL, ui::bold_family()),
-                            ui::colors(ui).muted,
-                        );
-                        let first = ((viewport.min.y - top - HEADER) / STICKER_CELL)
-                            .floor()
-                            .max(0.0) as usize;
-                        let last = (((viewport.max.y - top - HEADER) / STICKER_CELL)
-                            .ceil()
-                            .max(0.0) as usize)
-                            .min(rows);
-                        for row in first..last {
-                            let rect = Rect::from_min_size(
-                                origin + Vec2::new(0.0, top + HEADER + row as f32 * STICKER_CELL),
-                                Vec2::new(
-                                    sticker_columns(ui.ctx()) as f32 * STICKER_CELL,
-                                    STICKER_CELL,
-                                ),
-                            );
-                            let builder = UiBuilder::new()
-                                .max_rect(rect)
-                                .id_salt(("sticker-row", top.to_bits(), row))
-                                .layout(Layout::left_to_right(Align::Center));
-                            ui.scope_builder(builder, |ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                let cells = pack.items.iter().skip(row * sticker_columns(ui.ctx()));
-                                for item in cells.take(sticker_columns(ui.ctx())) {
-                                    let response = picture_tile(ui, item, STICKER_CELL);
-                                    if response.hovered() {
-                                        self.hover = Some(Hover::Custom(item.id));
-                                    }
-                                    if response.clicked() {
-                                        picked = Some(pick_custom(item, pack.foreign));
-                                    }
+                        let builder = UiBuilder::new()
+                            .max_rect(rect)
+                            .id_salt(("sticker-row", row))
+                            .layout(Layout::left_to_right(Align::Center));
+                        ui.scope_builder(builder, |ui| {
+                            let cells = items.iter().skip(row * STICKER_COLUMNS);
+                            for &(item, foreign) in cells.take(STICKER_COLUMNS) {
+                                let response = picture_tile(ui, item, cell);
+                                if response.hovered() {
+                                    self.hover = Some(Hover::Custom(item.id));
                                 }
-                            });
-                        }
+                                if response.clicked() {
+                                    tapped = Some((item, foreign));
+                                }
+                            }
+                        });
                     }
                 });
         });
-        picked
+        let (item, foreign) = tapped?;
+        if m.docked {
+            self.preview = Some(item.id);
+            return None;
+        }
+        Some(self.pick(item, foreign))
     }
 
     /// The hovered emoji large with its `:shortcode:`, or a tip.
-    fn bar(&self, ui: &mut Ui, scope: &Scope) {
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(width(columns(ui.ctx())), 48.0), Sense::hover());
+    fn bar(&self, ui: &mut Ui, scope: &Scope, m: &Metrics) {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(m.width, 48.0), Sense::hover());
         let mut ui = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(Vec2::new(PADDING, 6.0)))
@@ -760,7 +1000,7 @@ impl Picker {
             Some(Hover::Custom(id)) if let Some(emoji) = custom_emoji(id) => {
                 if let Some(picture) = &emoji.picture {
                     let (spot, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-                    crate::home::paint_hovered(&ui, spot, picture, 4.0);
+                    crate::home::paint_live(&ui, spot, picture, 4.0);
                 }
                 ui.label(ui::bold(format!(":{}:", emoji.name)));
             }
@@ -786,8 +1026,40 @@ impl Picker {
         draft.insert_text_at(&mut cursor, sequence, usize::MAX);
         state.cursor.set_char_range(Some(CCursorRange::one(cursor)));
         state.store(&field.ctx, field.id);
-        field.request_focus();
+        if self.open && docked(&field.ctx) {
+            // The panel stays up for more: the next one goes after this one, and the
+            // keyboard stays away.
+            self.insert_at = Some(CCursorRange::one(cursor));
+        } else {
+            field.request_focus();
+        }
     }
+}
+
+/// A line across the panel at `y`.
+fn line(ui: &Ui, y: f32) {
+    let rect = ui.max_rect();
+    ui.painter()
+        .hline(rect.x_range(), y, Stroke::new(1.0, ui::colors(ui).border));
+}
+
+/// The grid's area, `m.body` tall and inset like the rest of the panel.
+fn body<R>(ui: &mut Ui, m: &Metrics, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(m.width, m.body), Sense::hover());
+    let inner = Rect::from_min_max(
+        rect.min + Vec2::new(PADDING, ui::SPACE_XS),
+        rect.max - Vec2::new(PADDING - 4.0, 0.0),
+    );
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    // Tiles are exactly a cell; the emoji fills it without padding.
+    child.spacing_mut().item_spacing = Vec2::ZERO;
+    child.spacing_mut().button_padding = Vec2::ZERO;
+    add(&mut child)
 }
 
 /// What the emoji grid shows, taken from the picker for one frame.
@@ -908,8 +1180,9 @@ fn shortcode(sequence: &str) -> String {
         )
 }
 
-fn tile(ui: &mut Ui, sequence: &str, label: &str) -> Response {
-    let response = ui::choice_button(ui, false, text(sequence).size(24.0), Vec2::splat(CELL));
+fn tile(ui: &mut Ui, sequence: &str, label: &str, cell: f32) -> Response {
+    let size = (cell * 0.66).round();
+    let response = ui::choice_button(ui, false, text(sequence).size(size), Vec2::splat(cell));
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     response
 }
@@ -918,12 +1191,12 @@ fn tile(ui: &mut Ui, sequence: &str, label: &str) -> Response {
 pub fn picture_tile(ui: &mut Ui, emoji: &CustomEmoji, cell: f32) -> Response {
     let label = format!(":{}:", emoji.name);
     let response = match &emoji.picture {
-        // Large sets stay cheap: only the emoji under the pointer plays.
+        // It plays while on screen; the grids lay out only the rows in view.
         Some(picture) => {
             let picture = picture.clone();
             let size = Vec2::splat(cell - 8.0);
             let image = egui::Atom::paint(size, move |ui, args| {
-                crate::home::paint_hovered(ui, args.rect, &picture, 0.0);
+                crate::home::paint_live(ui, args.rect, &picture, 0.0);
             });
             ui::choice_button(ui, false, image, Vec2::splat(cell))
         }

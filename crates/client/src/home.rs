@@ -2933,6 +2933,15 @@ pub fn emoji_image(ui: &mut Ui, picture: &Picture, size: f32, label: &str) -> Re
     response
 }
 
+/// Paint a server emoji or sticker in `rect`, playing like `emoji_image`: all the time
+/// while on screen in a focused window, or only under the pointer with "On hover".
+pub fn paint_live(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
+    let play = ui.is_rect_visible(rect)
+        && ui.input(|input| input.focused)
+        && (!emoji::hover_only(ui.ctx()) || ui.rect_contains_pointer(rect));
+    paint_playing(ui, rect, picture, radius, play);
+}
+
 /// A picture's frames on the GPU and how long each shows, in ms.
 type Frames = Arc<(Vec<TextureHandle>, Vec<u32>)>;
 
@@ -5934,12 +5943,15 @@ fn composer(
     let wide = mentions::can_mention_everyone(dir, channel, dir.me);
     let editor = composer_id(channel);
     // From the draft as this frame starts; Enter checks the converted text below.
-    let ready =
-        !chat.draft.trim().is_empty() || (chat.editing.is_none() && !chat.staged.is_empty());
+    let ready = !chat.draft.trim().is_empty()
+        || (chat.editing.is_none() && !chat.staged.is_empty())
+        || emoji_picker.has_preview();
     let mut attach = None;
     let mut send = false;
     let mut tabs = Vec::new();
     let button = Vec2::splat(COMPOSER_BUTTON);
+    // On a phone, a tapped sticker waits here, above the box, until tapped or sent.
+    let previewed = emoji_picker.preview(ui, scope);
     let bar = Frame::new()
         .fill(ui::colors(ui).composer)
         .corner_radius(ui::RADIUS_WINDOW)
@@ -6033,6 +6045,14 @@ fn composer(
     let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, shown_scope);
     for (response, tab) in &tabs {
         emoji_picker.button(response, *tab, editor, was_open);
+    }
+    // Send sends the sticker waiting above the box, rather than the text.
+    let picked = picked
+        .or(previewed)
+        .or_else(|| send.then(|| emoji_picker.send_preview(scope)).flatten());
+    // Docked, tapping the box brings the keyboard back in the panel's place.
+    if picker::docked(ui.ctx()) && field.clicked() {
+        emoji_picker.close();
     }
     if chat.reacting.is_some() && (picked.is_some() || !emoji_picker.is_reacting()) {
         chat.reacting = None;
@@ -7921,6 +7941,7 @@ mod tests {
     mod reply_jump;
     mod server_emoji;
     mod settings_close;
+    mod sticker_picker;
     mod streams;
     mod switcher;
     mod touch;

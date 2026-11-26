@@ -1167,6 +1167,8 @@ picker.favourite = お気に入りに追加
 picker.unfavourite = お気に入りから削除
 picker.favourite_tip = 絵文字を右クリックするとお気に入りに追加できます。
 picker.sticker_tip = スタンプを選ぶとすぐに送信されます。
+picker.send_sticker = {name} を送信
+picker.close_preview = プレビューを閉じる
 picker.from_server = サーバー
 
 # crates/client/src/files.rs
