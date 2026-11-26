@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Large phone photos (up to 48 MP and wide panoramas) now show as pictures with a preview, the right way up, instead of as a file; files waiting to be sent show as equal tiles you can scroll through.
+
 ## v0.8.0 - 2026-11-26
 
 - Reconnecting after a network drop is quicker on busy servers: the app keeps the keys and devices it already checked instead of checking them all again.

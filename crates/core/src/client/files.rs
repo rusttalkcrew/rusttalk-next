@@ -16,6 +16,7 @@ use futures_util::stream;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Limits,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
+    metadata::Orientation,
 };
 use reqwest::{Body, Method, StatusCode, header::CONTENT_TYPE};
 use serde::Deserialize;
@@ -268,24 +269,91 @@ const PICTURE_FORMATS: &[ImageFormat] = &[
     ImageFormat::Gif,
     ImageFormat::WebP,
 ];
-const PICTURE_EDGE: u32 = 4096;
+/// The most pixels per edge of any picture, so panoramas still load.
+const PICTURE_EDGE: u32 = 16_384;
+/// The most decoded bytes one picture or frame may take, after JPEG scaling.
 const PICTURE_ALLOC: u64 = 64 * 1024 * 1024;
+/// The most pixels a JPEG may have before scaling: 8192×8192, more than a 48 MP photo.
+const JPEG_PIXELS: u64 = 8192 * 8192;
+/// A progressive JPEG keeps all its DCT coefficients (2 bytes each) at full size while
+/// decoding; this bounds them, which still fits a 24 MP photo.
+const PROGRESSIVE_ALLOC: u64 = 192 * 1024 * 1024;
+/// Stills shown in full shrink to this many pixels per edge, about a 4K screen.
+const VIEW_EDGE: u32 = 4096;
 /// Frames of one animation, however small they are.
 const MAX_ANIMATION_FRAMES: usize = 400;
 
-/// Decode a PNG, JPEG, GIF or WebP (its first frame), with dimension and allocation
+/// Decode a PNG, JPEG, GIF or WebP (its first frame), turned upright by its EXIF
+/// orientation and at most `VIEW_EDGE` pixels per edge, with dimension and allocation
 /// limits for hostile input.
 pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage> {
-    decode_limited(bytes, PICTURE_FORMATS, PICTURE_EDGE, PICTURE_ALLOC)
+    decode_still(bytes, None)
+}
+
+/// A still picture fit to `fit` pixels per edge, or shrunk to `VIEW_EDGE` without one.
+/// A JPEG decodes at the smallest DCT scale that still fills that size, so a 48 MP
+/// photo never needs all its pixels in memory.
+fn decode_still(bytes: &[u8], fit: Option<u32>) -> Result<DynamicImage> {
+    let jpeg = image::guess_format(bytes).ok() == Some(ImageFormat::Jpeg);
+    let scaled = jpeg.then(|| decode_jpeg(bytes, fit.unwrap_or(VIEW_EDGE / 2)));
+    let image = match scaled {
+        Some(Ok(image)) => image,
+        // Kinds the scaling decoder lacks (CMYK, 12-bit, arithmetic) get the general
+        // decoder and its usual limits.
+        _ => decode_limited(bytes, PICTURE_FORMATS, PICTURE_EDGE, PICTURE_ALLOC)?,
+    };
+    Ok(match fit {
+        Some(fit) => image.thumbnail(fit, fit),
+        None if image.width().max(image.height()) > VIEW_EDGE => {
+            image.thumbnail(VIEW_EDGE, VIEW_EDGE)
+        }
+        None => image,
+    })
+}
+
+/// Decode a JPEG scaled down by 1/2, 1/4 or 1/8 while still at least `edge` pixels on
+/// its longer side, and turn it upright.
+fn decode_jpeg(bytes: &[u8], edge: u32) -> Result<DynamicImage> {
+    use jpeg_decoder::{CodingProcess, Decoder, PixelFormat};
+    ensure!(bytes.len() <= MAX_CIPHERTEXT, "image input too large");
+    let mut decoder = Decoder::new(bytes);
+    decoder.read_info()?;
+    let info = decoder.info().context("JPEG without a header")?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let pixels = u64::from(width) * u64::from(height);
+    ensure!(
+        width.max(height) <= PICTURE_EDGE && pixels <= JPEG_PIXELS,
+        "picture too large"
+    );
+    ensure!(
+        info.coding_process != CodingProcess::DctProgressive
+            || pixels * info.pixel_format.pixel_bytes() as u64 * 2 <= PROGRESSIVE_ALLOC,
+        "progressive picture too large"
+    );
+    let edge = edge.min(u32::from(u16::MAX)) as u16;
+    let (width, height) = decoder.scale(edge, edge)?;
+    decoder.set_max_decoding_buffer_size(PICTURE_ALLOC as usize);
+    let pixels = decoder.decode()?;
+    let (width, height) = (u32::from(width), u32::from(height));
+    let mut image = match decoder.info().map(|info| info.pixel_format) {
+        Some(PixelFormat::RGB24) => {
+            image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8)
+        }
+        Some(PixelFormat::L8) => {
+            image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8)
+        }
+        _ => None,
+    }
+    .context("unsupported JPEG pixel format")?;
+    if let Some(orientation) = decoder.exif_data().and_then(Orientation::from_exif_chunk) {
+        image.apply_orientation(orientation);
+    }
+    Ok(image)
 }
 
 /// One frame, for pictures that are not animated.
 fn still(bytes: &[u8], fit: Option<u32>) -> Result<Vec<Frame>> {
-    let mut image = decode_image(bytes)?;
-    if let Some(fit) = fit {
-        image = image.thumbnail(fit, fit);
-    }
-    Ok(vec![Frame::new(image.into_rgba8())])
+    Ok(vec![Frame::new(decode_still(bytes, fit)?.into_rgba8())])
 }
 
 /// Decode every frame of a picture with its delay, for animated GIF and WebP (other
@@ -371,16 +439,21 @@ pub(super) fn decode_limited(
     limits.max_image_width = Some(edge);
     limits.max_image_height = Some(edge);
     limits.max_alloc = Some(alloc);
-    reader.limits(limits);
-    Ok(reader.decode()?)
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    limits.reserve(decoder.total_bytes())?;
+    let orientation = decoder.orientation()?;
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(image)
 }
 
 /// A PNG thumbnail (of the first frame) for a decodable PNG, JPEG, GIF or WebP. Anything else, including images
 /// over the decode limits, is still sent, just without a thumbnail.
 fn make_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
-    let image = decode_image(bytes).ok()?;
+    let image = decode_still(bytes, Some(THUMBNAIL_EDGE)).ok()?;
     let mut png = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(image.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE).into_rgba8())
+    DynamicImage::ImageRgba8(image.into_rgba8())
         .write_to(&mut png, ImageFormat::Png)
         .ok()?;
     let png = png.into_inner();
@@ -536,7 +609,7 @@ mod tests {
     #[test]
     fn image_decoder_rejects_hostile_dimensions_and_non_images() -> Result<()> {
         let mut png = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(4097, 1).write_to(&mut png, ImageFormat::Png)?;
+        DynamicImage::new_rgb8(PICTURE_EDGE + 1, 1).write_to(&mut png, ImageFormat::Png)?;
         let error = decode_image(png.get_ref())
             .err()
             .unwrap()
@@ -591,7 +664,7 @@ mod tests {
             assert_eq!((decoded.width(), decoded.height()), (320, 120));
         }
         // Over the decode limits: still sent, without a thumbnail.
-        assert!(make_thumbnail(&gif(4097, 1, 1)?).is_none());
+        assert!(make_thumbnail(&gif(PICTURE_EDGE + 1, 1, 1)?).is_none());
         Ok(())
     }
 
@@ -622,13 +695,83 @@ mod tests {
         // Unsupported, oversized or broken images are uploaded without a thumbnail.
         assert!(make_thumbnail(b"GIF89a\x01\x00\x01\x00").is_none());
         assert!(make_thumbnail(b"RIFF\x00\x00\x00\x00WEBPVP8 ").is_none());
-        assert!(make_thumbnail(&png(4097, 1)?).is_none());
+        assert!(make_thumbnail(&png(PICTURE_EDGE + 1, 1)?).is_none());
         assert!(make_thumbnail(&png(64, 64)?[..40]).is_none());
 
         // Received thumbnails are only small PNGs.
         assert!(decode_thumbnail(&png(321, 1)?).is_err());
         assert!(decode_thumbnail(jpeg.get_ref()).is_err());
         assert!(decode_thumbnail(&vec![0; MAX_THUMBNAIL_BYTES + 1]).is_err());
+        Ok(())
+    }
+
+    /// A JPEG whose top half is red and bottom half blue, with an EXIF orientation.
+    fn jpeg(width: u32, height: u32, orientation: Option<u16>) -> Result<Vec<u8>> {
+        use image::{ImageEncoder, codecs::jpeg::JpegEncoder};
+        let picture = image::RgbImage::from_fn(width, height, |_, y| {
+            if y < height / 2 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        });
+        let mut bytes = Vec::new();
+        let mut encoder = JpegEncoder::new(&mut bytes);
+        if let Some(value) = orientation {
+            // A little-endian TIFF header with one IFD entry: Orientation (0x0112), SHORT.
+            let mut exif = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+            exif.extend_from_slice(&value.to_le_bytes());
+            exif.extend_from_slice(&[0; 6]);
+            encoder.set_exif_metadata(exif)?;
+        }
+        encoder.write_image(
+            picture.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )?;
+        Ok(bytes)
+    }
+
+    #[test]
+    fn phone_photos_get_an_upright_thumbnail() -> Result<()> {
+        // A 24 MP photo, over the old 4096-pixel limit.
+        let thumbnail = make_thumbnail(&jpeg(6000, 4000, None)?).context("missing thumbnail")?;
+        let decoded = decode_thumbnail(&thumbnail)?;
+        assert_eq!((decoded.width(), decoded.height()), (320, 213));
+        // Shown in full it shrinks to a screen-sized picture.
+        let full = decode_frames(&jpeg(6000, 4000, None)?, None, 1 << 30)?;
+        assert_eq!(full[0].buffer().dimensions(), (3000, 2000));
+
+        // Rotated 90° clockwise by EXIF: portrait, with the red top now on the right.
+        let thumbnail = make_thumbnail(&jpeg(600, 400, Some(6))?).context("missing thumbnail")?;
+        let decoded = decode_thumbnail(&thumbnail)?.into_rgb8();
+        assert_eq!(decoded.dimensions(), (213, 320));
+        let (left, right) = (decoded.get_pixel(20, 160), decoded.get_pixel(193, 160));
+        assert!(left[2] > 200 && left[0] < 60, "left is {left:?}");
+        assert!(right[0] > 200 && right[2] < 60, "right is {right:?}");
+        let inline = decode_frames(&jpeg(600, 400, Some(6))?, Some(320), 1 << 20)?;
+        assert_eq!(inline[0].buffer().dimensions(), (213, 320));
+        Ok(())
+    }
+
+    #[test]
+    fn jpeg_bombs_still_fail() -> Result<()> {
+        // A baseline JPEG header claiming 65535×65535 pixels, with no data behind it.
+        let mut bomb = jpeg(16, 16, None)?;
+        let sof = bomb
+            .windows(2)
+            .position(|pair| pair == [0xff, 0xc0])
+            .context("no SOF")?;
+        bomb[sof + 5..sof + 9].copy_from_slice(&[0xff; 4]);
+        assert!(decode_jpeg(&bomb, THUMBNAIL_EDGE).is_err());
+        assert!(make_thumbnail(&bomb).is_none());
+        assert!(decode_frames(&bomb, None, usize::MAX).is_err());
+        // 8200×8200 is over the pixel limit, though each edge is allowed.
+        let header = &mut jpeg(16, 16, None)?;
+        header[sof + 5..sof + 9].copy_from_slice(&[0x20, 0x08, 0x20, 0x08]);
+        assert!(decode_jpeg(header, THUMBNAIL_EDGE).is_err());
+        assert!(make_thumbnail(header).is_none());
         Ok(())
     }
 }

@@ -629,3 +629,109 @@ fn picked_copies_attach_under_their_name_and_go_when_removed() {
     assert!(!kept.parent().unwrap().exists());
     assert!(original.exists());
 }
+
+/// Staged files are equal square tiles, whatever they are: a phone photo larger than
+/// 4096 pixels shows as a picture, other files as an icon with their name. Set
+/// `RUSTTALK_STAGED_SCREENSHOTS` to a folder to save the composer.
+#[test]
+fn staged_files_are_equal_tiles() {
+    let _route = crate::route::test_lock();
+    let data = tempfile::tempdir().unwrap();
+    // A 24 MP phone photo, over the old 4096-pixel decode limit.
+    let photo = data.path().join("IMG_2676.jpeg");
+    image::RgbImage::from_fn(5712, 4284, |x, y| {
+        image::Rgb([(x / 23) as u8, (y / 17) as u8, 160])
+    })
+    .save(&photo)
+    .unwrap();
+    let small = data.path().join("Sunset.png");
+    image::RgbImage::from_fn(300, 200, |x, _| image::Rgb([250, 120 + (x / 3) as u8, 60]))
+        .save(&small)
+        .unwrap();
+    let notes = data
+        .path()
+        .join("Trip notes for the weekend in the mountains.pdf");
+    std::fs::write(&notes, vec![0; 48_000]).unwrap();
+    let sheet = data.path().join("Budget.xlsx");
+    std::fs::write(&sheet, vec![0; 9_000]).unwrap();
+    let paths = [photo, small, notes, sheet];
+    for dark in [true, false] {
+        for size in [Vec2::new(390., 844.), Vec2::new(1100., 700.)] {
+            let (mut base, _sent) = files_harness(dark);
+            let mut home = base.state_mut().take().unwrap();
+            home.view = View::Server(0);
+            home.servers[0].open = Some(PROJECTS);
+            home.layout.list = false;
+            home.find.opened = false;
+            let mut settings = home.voice.audio.settings();
+            settings.language = "en".into();
+            settings.set_appearance(ui::Appearance {
+                mode: if dark {
+                    ui::Mode::Dark
+                } else {
+                    ui::Mode::Light
+                },
+                ..Default::default()
+            });
+            home.voice.audio.set_settings(settings);
+            let chat = home.servers[0].chats.get_mut(&PROJECTS).unwrap();
+            chat.staged = (paths.iter())
+                .map(|path| crate::server::Staged {
+                    path: path.clone(),
+                    name: path.file_name().unwrap().to_string_lossy().into(),
+                    size: std::fs::metadata(path).unwrap().len(),
+                })
+                .collect();
+            let names: Vec<String> = chat.staged.iter().map(|file| file.name.clone()).collect();
+            let mut h = Harness::builder()
+                .with_context_setup(ui::install)
+                .with_size(size)
+                .build_ui_state(
+                    |ui, (home, updates, keys): &mut Screen| {
+                        show(ui, home, updates, keys);
+                    },
+                    (
+                        home,
+                        crate::update::Updater::new(data.path()),
+                        crate::keystore::without_keychain(data.path()),
+                    ),
+                );
+            let tile = |h: &Harness<'_, Screen>, name: &str| {
+                let label = format!("{name} · ");
+                h.get_by_label_contains(&label).rect()
+            };
+            // A decoded picture's tile is a button; it decodes on a thread of its own.
+            let decoded = |h: &Harness<'_, Screen>| {
+                names[..2].iter().all(|name| {
+                    let label = format!("{name} · ");
+                    h.query_all_by_role(egui::Role::Button).any(|node| {
+                        (node.accesskit_node().label()).is_some_and(|l| l.starts_with(&label))
+                    })
+                })
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            h.run_steps(2);
+            while !decoded(&h) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+                h.run_steps(1);
+            }
+            assert!(decoded(&h), "the staged pictures did not decode");
+            h.run_steps(2);
+            for name in &names {
+                assert_eq!(
+                    tile(&h, name).size(),
+                    Vec2::splat(112.0),
+                    "{name} is not a square tile"
+                );
+            }
+            assert_eq!(h.query_all_by_label("Remove").count(), names.len());
+            if let Ok(dir) = std::env::var("RUSTTALK_STAGED_SCREENSHOTS") {
+                let theme = if dark { "dark" } else { "light" };
+                h.render()
+                    .unwrap()
+                    .save(format!("{dir}/composer-{}-{theme}.png", size.x))
+                    .unwrap();
+            }
+        }
+    }
+}
