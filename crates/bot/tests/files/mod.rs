@@ -19,6 +19,36 @@ const PNG: &str = "W13 Private Image Carnelian.png";
 const MARKER: &[u8] = b"W13 Amethyst plaintext only on device";
 const MIB: usize = 1024 * 1024;
 
+/// Send `request`, waiting as asked while the server says to slow down (429), like the
+/// app does: these checks follow many quick uploads.
+async fn paced(request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    loop {
+        let again = request
+            .try_clone()
+            .context("a body that can be sent again")?;
+        let reply = again.send().await?;
+        if reply.status() != StatusCode::TOO_MANY_REQUESTS {
+            return Ok(reply);
+        }
+        let wait = (reply.headers().get(reqwest::header::RETRY_AFTER))
+            .and_then(|value| value.to_str().ok()?.parse().ok())
+            .context("a 429 without Retry-After")?;
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
+}
+
+/// Pick a rate-limit preset as the owner.
+async fn rate_limits(owner: &KeyClient<'_>, preset: &str) -> Result<()> {
+    let reply = (owner.request(Method::PUT, "/v1/settings/rate-limits"))
+        .json(&json!({ "preset": preset }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let saved: serde_json::Value = reply.json().await?;
+    anyhow::ensure!(saved["preset"] == preset, "preset not saved");
+    Ok(())
+}
+
 fn check_storage(project: &str, live_id: &str) -> Result<()> {
     let raw = compose_bytes(
         project,
@@ -202,10 +232,7 @@ pub(super) async fn scenario(
     a.delete_file(&winner).await?;
     // A deleted file's ID stays reserved.
     rejected(
-        upload(a, encode(&winner))
-            .body(vec![0xA3; 1024])
-            .send()
-            .await?,
+        paced(upload(a, encode(&winner)).body(vec![0xA3; 1024])).await?,
         StatusCode::CONFLICT,
         "file_exists",
     )
@@ -335,7 +362,9 @@ pub(super) async fn scenario(
     assert_eq!(b.download_file(&listed.file.file, None).await?, MARKER);
     b.delete_message_file(&shared.file.id, &a_person).await?;
     assert!(b.shared_files(&channel.id).await?.is_empty());
-    // A channel keeps at most 500 shared files; the list returns them all.
+    // A channel keeps at most 500 shared files; the list returns them all. Filling it
+    // at once is no normal use, so the owner relaxes the rate limits meanwhile.
+    rate_limits(a, "relaxed").await?;
     for _ in 0..500 {
         share(a, &channel.id).await?;
     }
@@ -355,11 +384,12 @@ pub(super) async fn scenario(
     .await?;
     // An expired file's ID stays reserved.
     rejected(
-        upload(a, id.clone()).body(vec![0xA3; 1024]).send().await?,
+        paced(upload(a, id.clone()).body(vec![0xA3; 1024])).await?,
         StatusCode::CONFLICT,
         "file_exists",
     )
     .await?;
+    rate_limits(a, "standard").await?;
     let replacement = a
         .upload_file(&channel.id, FILE, "application/octet-stream", &bytes, None)
         .await?;

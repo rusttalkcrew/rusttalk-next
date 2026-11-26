@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{query, query_scalar};
 
-use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, payload};
+use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, limits, payload};
 
 #[derive(Deserialize)]
 pub struct NewDm {
@@ -60,6 +60,8 @@ pub async fn create(
         tx.commit().await?;
         return Ok((StatusCode::OK, Json(json!({ "id": id }))));
     }
+    // Only a new conversation counts: reopening one is free.
+    app.limits.check(&actor, limits::Action::NewDm)?;
     let reserved = query("INSERT INTO channel_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
         .execute(&mut *tx)

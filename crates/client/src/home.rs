@@ -1958,6 +1958,11 @@ impl Home {
                     self.chat(index, channel).uploading = what;
                 }
             }
+            Update::SlowDown(address, channel, waiting) => {
+                if let Some(index) = self.index(&address) {
+                    self.chat(index, channel).slow_down = waiting;
+                }
+            }
             Update::Image(address, blob, fetch, frames) => {
                 self.files.image(ctx, &address, &blob, fetch, frames)
             }
@@ -5940,6 +5945,9 @@ fn composer(
             );
         });
     }
+    if chat.slow_down {
+        ui.weak(t!("home.slow_down"));
+    }
     let wide = mentions::can_mention_everyone(dir, channel, dir.me);
     let editor = composer_id(channel);
     // From the draft as this frame starts; Enter checks the converted text below.
@@ -7951,6 +7959,7 @@ mod tests {
     mod outbox;
     mod presence;
     mod rail;
+    mod rate_limits;
     mod reactions;
     mod reply_jump;
     mod server_emoji;

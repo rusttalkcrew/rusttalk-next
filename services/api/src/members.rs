@@ -164,6 +164,7 @@ pub async fn invite(
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::Invite)?;
+    app.limits.check(&actor, crate::limits::Action::Invite)?;
     let expires_at = actor.at + ttl_seconds;
     query("DELETE FROM invites WHERE expires_at <= ?")
         .bind(actor.at)
@@ -861,6 +862,7 @@ mod tests {
             key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).into(),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: None,
             session_ttl: crate::auth::SESSION_TTL,
             listing_changed: tokio::sync::watch::channel(()).0,

@@ -9,6 +9,7 @@ mod files;
 mod history;
 mod index;
 mod keys;
+mod limits;
 mod members;
 mod messages;
 mod metadata;
@@ -38,7 +39,7 @@ use axum::{
     extract::{MatchedPath, Request, rejection::JsonRejection},
     http::{
         HeaderMap, Method, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_LENGTH},
+        header::{CACHE_CONTROL, CONTENT_LENGTH, RETRY_AFTER},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -75,6 +76,7 @@ struct App {
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
+    limits: Arc<limits::Limits>,
     session_ttl: i64,
 }
 
@@ -119,6 +121,8 @@ struct ApiError {
     code: &'static str,
     /// The underlying error for the server log only, such as SQLite's message.
     detail: Option<String>,
+    /// Seconds until a refused request may be tried again (429).
+    retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -127,6 +131,7 @@ impl ApiError {
             status,
             code,
             detail: None,
+            retry_after: None,
         }
     }
     fn bad_request(code: &'static str) -> Self {
@@ -181,10 +186,15 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
             tracing::error!(reason = self.code, error = self.detail, "request failed");
-        } else {
+        } else if self.retry_after.is_none() {
+            // Rate limits log once a minute per person themselves, not every refusal.
             tracing::warn!(reason = self.code, "request rejected");
         }
-        (self.status, Json(json!({ "error": self.code }))).into_response()
+        let mut response = (self.status, Json(json!({ "error": self.code }))).into_response();
+        if let Some(seconds) = self.retry_after {
+            response.headers_mut().insert(RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -244,9 +254,11 @@ async fn run() -> Result<()> {
             history::init()?;
             let files = Arc::new(files::Files::open(&dir, &db).await?);
             let emoji = Arc::new(emoji::Emoji::open(&dir, &db).await?);
+            let limits = Arc::new(limits::Limits::open(&mut *db.acquire().await?).await?);
             serve(App {
                 files,
                 emoji,
+                limits,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(CHANGE_BACKLOG).0,
@@ -317,6 +329,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/files",
             get(file_settings::get).put(file_settings::set),
+        )
+        .route(
+            "/v1/settings/rate-limits",
+            get(limits::get).put(limits::set),
         )
         .route(
             "/v1/settings/message-history",

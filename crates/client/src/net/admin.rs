@@ -3,7 +3,10 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{FileLimits, FileSettings, MessageHistory, ServerUpdates, decode, encode},
+    auth::{
+        FileLimits, FileSettings, MessageHistory, RateLimitPreset, RateLimits, ServerUpdates,
+        decode, encode,
+    },
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -68,6 +71,8 @@ pub enum Admin {
     LoadHistory,
     /// How many messages each channel keeps; 0 keeps them all.
     SaveHistory(i64),
+    LoadRateLimits,
+    SaveRateLimits(RateLimitPreset),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -171,6 +176,8 @@ pub enum AdminUpdate {
     Files(FileSettings),
     /// `None` from a server too old to change it.
     History(Option<MessageHistory>),
+    /// `None` from a server too old to change it.
+    RateLimits(Option<RateLimits>),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -338,6 +345,22 @@ async fn change(
                 .map(|history| {
                     send(AdminUpdate::History(history));
                     t!("admin.done_history")
+                })
+        }
+        Admin::LoadRateLimits => {
+            match newer_setting(client, RATE_LIMITS, Method::GET, None).await {
+                Ok(limits) => send(AdminUpdate::RateLimits(limits)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return None;
+        }
+        Admin::SaveRateLimits(preset) => {
+            let body = Some(json!({ "preset": preset }));
+            newer_setting(client, RATE_LIMITS, Method::PUT, body)
+                .await
+                .map(|limits| {
+                    send(AdminUpdate::RateLimits(limits));
+                    t!("admin.done_rate_limits")
                 })
         }
         Admin::LoadUpdates => {
@@ -986,22 +1009,32 @@ async fn file_settings(
         .map_err(|error| failed(&error.into()))
 }
 
-/// `None` when the server predates the setting.
 async fn message_history(
     client: &KeyClient<'_>,
     method: Method,
     body: Option<Value>,
 ) -> Result<Option<MessageHistory>, String> {
-    const PATH: &str = "/v1/settings/message-history";
+    newer_setting(client, "/v1/settings/message-history", method, body).await
+}
+
+const RATE_LIMITS: &str = "/v1/settings/rate-limits";
+
+/// A setting older servers lack: `None` when the server predates it.
+async fn newer_setting<T: serde::de::DeserializeOwned>(
+    client: &KeyClient<'_>,
+    path: &str,
+    method: Method,
+    body: Option<Value>,
+) -> Result<Option<T>, String> {
     let reply = if method == Method::GET {
-        match client.request(Method::GET, PATH).send().await {
+        match client.request(Method::GET, path).send().await {
             Ok(reply) if reply.status() == reqwest::StatusCode::NOT_FOUND => return Ok(None),
             Ok(reply) if reply.status().is_success() => reply,
             // Ask again through `request`, which puts the problem into words.
-            _ => request(client, method, PATH, body).await?,
+            _ => request(client, method, path, body).await?,
         }
     } else {
-        request(client, method, PATH, body).await?
+        request(client, method, path, body).await?
     };
     reply
         .json()

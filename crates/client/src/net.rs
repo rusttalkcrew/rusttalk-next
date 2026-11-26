@@ -496,6 +496,8 @@ pub enum Update {
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
+    /// The server asked to slow down: a message to this channel waits (`true`) or went.
+    SlowDown(Url, Id, bool),
     /// A channel's shared files, newest first; empty when loading them failed.
     SharedFiles(Url, Id, Vec<rusttalk_core::client::SharedFile>),
     /// How far saving a stored file got (0 to 1), by blob ID.
@@ -2224,10 +2226,12 @@ async fn run_command(
 fn report(ctx: &Ctx, error: anyhow::Error) {
     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
     let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    let limited = error.is::<rusttalk_core::client::RateLimited>();
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if limited => t!("net.slow_down"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));

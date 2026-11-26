@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Servers now slow down members who post, react, upload or invite much faster than a person could, and owners pick Relaxed, Standard or Strict in Server settings; a message sent too fast waits a moment and goes out by itself.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

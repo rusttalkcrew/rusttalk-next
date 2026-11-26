@@ -5,6 +5,7 @@ mod emoji;
 mod file_limits;
 
 mod history;
+mod rate_limits;
 
 mod import;
 
@@ -66,6 +67,8 @@ pub enum Tab {
     Files,
     /// How many messages each channel keeps.
     History,
+    /// How fast members may post, upload and so on.
+    RateLimits,
     /// The owner's public listing.
     Listing,
     /// Server emoji.
@@ -96,6 +99,7 @@ pub struct Settings {
     joining: Option<(bool, u32)>,
     files: Option<file_limits::Form>,
     history: Option<history::Form>,
+    rate_limits: Option<rate_limits::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -162,6 +166,10 @@ impl Settings {
             AdminUpdate::History(saved) => match &mut self.history {
                 Some(form) if form.unsaved() => form.saved(saved),
                 history => *history = Some(history::Form::new(saved)),
+            },
+            AdminUpdate::RateLimits(saved) => match &mut self.rate_limits {
+                Some(form) if form.unsaved() => form.saved(saved),
+                limits => *limits = Some(rate_limits::Form::new(saved)),
             },
             AdminUpdate::Listing(on, saved) => {
                 let saved = (on, saved.unwrap_or_default());
@@ -230,6 +238,7 @@ impl Settings {
             || (self.server_name.as_deref()).is_some_and(|typed| typed.trim() != name)
             || self.files.as_ref().is_some_and(file_limits::Form::unsaved)
             || self.history.as_ref().is_some_and(history::Form::unsaved)
+            || (self.rate_limits.as_ref()).is_some_and(rate_limits::Form::unsaved)
             || self.joining_unsaved()
             || self.listing_unsaved()
             || self.emoji.unsaved()
@@ -329,6 +338,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::History {
         server.send(Command::Admin(Admin::LoadHistory));
     }
+    if tab == Tab::RateLimits {
+        server.send(Command::Admin(Admin::LoadRateLimits));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -342,6 +354,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         joining: None,
         files: None,
         history: None,
+        rate_limits: None,
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -527,6 +540,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     page(Tab::Joining, "🚪", t!("admin.joining"), perms.admin),
                     page(Tab::Files, "📎", t!("admin.files"), true),
                     page(Tab::History, "💬", t!("admin.history"), true),
+                    page(Tab::RateLimits, "⏱", t!("admin.rate_limits"), true),
                     page(Tab::Emoji, "😀", t!("admin.emoji"), perms.manage_emoji),
                     page(Tab::Stickers, "🏷", t!("admin.stickers"), perms.manage_emoji),
                     page(Tab::Listing, "🌐", t!("admin.public_listing"), perms.owner),
@@ -608,6 +622,15 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             None
                         }
                     }
+                    Tab::RateLimits => {
+                        if let Some(form) = &mut settings.rate_limits {
+                            form.show(ui, perms.manage_server)
+                                .map(Admin::SaveRateLimits)
+                        } else {
+                            loading(ui, settings);
+                            None
+                        }
+                    }
                     Tab::Listing => listing_tab(ui, server, settings),
                     Tab::Emoji | Tab::Stickers => {
                         let sticker = before == Tab::Stickers;
@@ -643,6 +666,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::Listing => Some(Admin::LoadListing),
                 Tab::Files => Some(Admin::LoadFiles),
                 Tab::History => Some(Admin::LoadHistory),
+                Tab::RateLimits => Some(Admin::LoadRateLimits),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,

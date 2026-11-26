@@ -834,6 +834,7 @@ mod tests {
             key: Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: Some(Arc::new(LiveKit {
                 api_key: api_key.into(),
                 api_secret: Zeroizing::new(api_secret.into()),

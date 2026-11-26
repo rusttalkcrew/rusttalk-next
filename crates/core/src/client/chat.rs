@@ -215,8 +215,12 @@ impl KeyClient<'_> {
             "id": encode(&scope.id), "peer": encode(peer),
             "commitment": encode(&context.commitment), "envelope": envelope,
         }));
-        let response: Result<CreatedDm> =
-            async { Ok(request.send().await?.error_for_status()?.json().await?) }.await;
+        let response: Result<CreatedDm> = async {
+            Ok(super::RateLimited::check(request.send().await?)?
+                .json()
+                .await?)
+        }
+        .await;
         // The server had one already, or refused: that one isn't new, so it is pinned
         // as usual and re-keyed before use.
         if response
@@ -389,6 +393,9 @@ impl KeyClient<'_> {
             .json(&post)
             .send()
             .await?;
+        if let Some(limited) = super::RateLimited::from_response(&response) {
+            return Err(limited.into());
+        }
         if let Err(error) = response.error_for_status_ref() {
             let status = response.status();
             if backfill_at.is_some() {
@@ -471,13 +478,14 @@ impl KeyClient<'_> {
                 .await?;
             // Another client or retention may already have removed the edit.
             if reply.status() != StatusCode::NOT_FOUND {
-                reply.error_for_status()?;
+                super::RateLimited::check(reply)?;
             }
         }
-        self.request(Method::DELETE, &record_path(channel, id))
-            .send()
-            .await?
-            .error_for_status()?;
+        super::RateLimited::check(
+            self.request(Method::DELETE, &record_path(channel, id))
+                .send()
+                .await?,
+        )?;
         Ok(())
     }
 
