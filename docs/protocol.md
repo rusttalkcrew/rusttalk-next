@@ -712,6 +712,18 @@ Blocked people's DMs are hidden and never notify. The servers still deliver
 these messages; refusing them there would mean telling the server who is a
 friend.
 
+Blocking is enforced only by the blocker's apps. Their DMs, pokes, friend and
+voice requests are dropped; in shared channels their messages fold into a
+"Blocked message" line that the person can open, and never mark, mention or
+notify; in calls their voice is muted on the device that blocked (the local
+mixer, not synced). The server is never told. A server-side list would let it
+refuse DMs and pokes before storing them, but the server already knows the
+sender and the receiver of every DM, so any refusal rule it evaluates reveals
+who blocks whom to the operator; a keyed hash doesn't help, since person IDs
+are public. The cost is that a blocked person can still use the blocker's
+servers' storage and bandwidth for DMs nobody reads; server rate limits and
+moderation (kick, ban) cover abuse of that.
+
 ### Pokes
 
 A poke is a short note that pops up for someone. It is a DM message with the

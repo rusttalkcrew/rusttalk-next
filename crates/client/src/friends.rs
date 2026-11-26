@@ -73,6 +73,10 @@ impl Friends {
             .map_or(Relation::None, |contact| contact.relation)
     }
 
+    pub fn is_blocked(&self, person: &Id) -> bool {
+        self.relation(person) == Relation::Blocked
+    }
+
     pub fn contacts(&self) -> impl Iterator<Item = (&Id, &Contact)> {
         self.contacts.iter()
     }

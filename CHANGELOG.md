@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Block someone from their profile card, right-click menu or the Friends list: their messages in servers fold into a "Blocked message" line you can open, their voice is muted for you, and their DMs, pokes and friend requests don't reach you. Manage the list in Settings → Privacy; it follows you to your other devices and servers never see it.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

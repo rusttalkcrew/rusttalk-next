@@ -175,6 +175,7 @@ fn options() -> Vec<(Tab, &'static str)> {
         (Tab::Profile, t!("settings.your_id")),
         (Tab::Privacy, t!("keys.section")),
         (Tab::Privacy, t!("home.direct_messages")),
+        (Tab::Privacy, t!("friends.blocked_section")),
         (Tab::Privacy, t!("home.member_lists")),
         (Tab::Privacy, t!("previews.section")),
         (Tab::Privacy, t!("home.server_directory")),

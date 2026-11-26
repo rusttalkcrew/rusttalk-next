@@ -107,6 +107,10 @@ pub struct Settings {
     member: Option<(Id, MemberAction)>,
     /// The kick, ban or roles question was already on screen last frame.
     member_shown: bool,
+    /// "Also block them for me" on the ban question, and whom to block once the ban
+    /// went through.
+    also_block: bool,
+    block_after_ban: Option<Id>,
     members: members::View,
     roles: roles::RolesPage,
     invites: Vec<Invite>,
@@ -199,6 +203,7 @@ impl Settings {
             }
             AdminUpdate::Failed(text) => {
                 self.saving = None;
+                self.block_after_ban = None;
                 self.roles.failed();
                 self.emoji.failed();
                 if let Some(import) = &mut self.import {
@@ -207,6 +212,12 @@ impl Settings {
                 self.message = Some((text, true));
             }
         }
+    }
+
+    /// Whom to block now that a change went through: the person banned with
+    /// "Also block them for me".
+    pub fn banned_to_block(&mut self) -> Option<Id> {
+        self.block_after_ban.take()
     }
 
     fn joining_unsaved(&self) -> bool {
@@ -349,6 +360,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         updates: ServerUpdates::default(),
         member: None,
         member_shown: false,
+        also_block: false,
+        block_after_ban: None,
         members: members::View::default(),
         roles: roles::RolesPage::default(),
         invites: Vec::new(),
@@ -409,6 +422,7 @@ pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
         settings.tab = Tab::Members;
         settings.member = Some((person, action));
         settings.message = None;
+        settings.also_block = false;
     }
 }
 
@@ -954,9 +968,11 @@ fn members_tab<'a>(
                     ui.label(t!("admin.ban_help"));
                     ui::checkbox(ui, network, t!("admin.ban_network"));
                     ui.weak(t!("admin.ban_network_help"));
+                    ui::checkbox(ui, &mut settings.also_block, t!("admin.ban_also_block"));
                     ui.horizontal(|ui| {
                         if danger(ui, t!("admin.ban")).clicked() {
                             request = Some(Admin::Ban(person, *network));
+                            settings.block_after_ban = settings.also_block.then_some(person);
                         }
                         cancel = ui::secondary(ui, t!("common.cancel")).clicked();
                     });

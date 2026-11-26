@@ -43,10 +43,38 @@ impl Home {
             return;
         }
         let name = self.peer_name(&person);
+        let was_blocked = self.friends.is_blocked(&person);
         if let Some(signal) = self.friends.act(person, act, &name, now_ms()) {
             self.signal(person, signal, &targets);
         }
+        if self.friends.is_blocked(&person) != was_blocked {
+            self.mute_voice(person, !was_blocked);
+        }
         self.publish_friends();
+    }
+
+    /// Block someone: they look unfriended, and their DMs, pokes, friend requests and
+    /// voice requests are dropped on this person's devices. Synced, never sent to a server.
+    pub fn block(&mut self, person: Id, now: f64) {
+        self.befriend(person, Act::Block, now);
+    }
+
+    pub fn unblock(&mut self, person: Id, now: f64) {
+        self.befriend(person, Act::Unblock, now);
+    }
+
+    pub fn is_blocked(&self, person: &Id) -> bool {
+        self.friends.is_blocked(person)
+    }
+
+    /// Their voice in calls, on this device only, as the call mixer sets it.
+    fn mute_voice(&self, person: Id, muted: bool) {
+        let audio = &self.voice.audio;
+        let mut all = audio.mix();
+        let mut mix = all.person(&person);
+        mix.voice.muted = muted;
+        all.set_person(&person, mix);
+        audio.set_mix(all);
     }
 
     /// Send a friend message in the DM on each server, with one ID so the copies merge.

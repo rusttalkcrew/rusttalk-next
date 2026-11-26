@@ -1018,6 +1018,8 @@ pub struct Chat {
     pub flash: Option<(Id, Id, f64)>,
     /// Row heights and the row in view, so only rows near the view are laid out.
     pub rows: crate::home::rows::Rows,
+    /// Blocked people's messages shown anyway, by author and ID.
+    pub revealed: std::collections::HashSet<(Id, Id)>,
     /// Where each ID is in `messages`, for reply quotes; rebuilt after changes.
     by_id: HashMap<Id, Vec<usize>>,
     by_id_len: Option<usize>,

@@ -240,6 +240,18 @@ impl<'a> Person<'a> {
                 pick = Some(Pick::AskToJoin);
             }
         }
+        if !self.me() && member.is_some() {
+            ui.add_space(ui::SPACE_S);
+            let blocked = self.relation == Relation::Blocked;
+            let (label, act) = if blocked {
+                (t!("friends.unblock"), Act::Unblock)
+            } else {
+                (t!("friends.block"), Act::Block)
+            };
+            if ui::secondary(ui, label).clicked() {
+                pick = Some(Pick::Befriend(act));
+            }
+        }
         if pick.is_some() {
             ui.close();
         }
@@ -856,6 +868,68 @@ mod tests {
             moderation_shown(&elsewhere),
             [false, false, true, true, true]
         );
+    }
+
+    /// Ban Ann from her menu, ticking "Also block them for me" when `block`, and
+    /// let the server answer with `answer`.
+    fn ban_ann(block: bool, answer: crate::net::AdminUpdate) -> Harness<'static, Option<Home>> {
+        let (mut harness, mut sent, _other) = kick_harness(false);
+        (harness.get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Ann"))
+            .click_secondary();
+        harness.run_steps(4);
+        harness.get_by_label(t!("admin.ban")).click();
+        harness.run_steps(4);
+        if block {
+            harness.get_by_label(t!("admin.ban_also_block")).click();
+            harness.run_steps(2);
+        }
+        harness.get_by_label(t!("admin.ban")).click();
+        harness.run_steps(4);
+        let banned = std::iter::from_fn(|| sent.try_recv().ok()).any(
+            |command| matches!(command, Command::Admin(Admin::Ban(person, false)) if person == ANN),
+        );
+        assert!(banned);
+        let address = harness.state().as_ref().unwrap().servers[0].address.clone();
+        let ctx = harness.ctx.clone();
+        let home = harness.state_mut().as_mut().unwrap();
+        home.apply_update(&ctx, crate::net::Update::Admin(address, answer), 0.0);
+        harness
+    }
+
+    #[test]
+    fn ban_also_blocks_only_when_ticked_and_once_it_went_through() {
+        use crate::net::AdminUpdate;
+        let is_blocked =
+            |h: &Harness<'static, Option<Home>>| h.state().as_ref().unwrap().is_blocked(&ANN);
+        assert!(is_blocked(&ban_ann(true, AdminUpdate::Done("Banned"))));
+        assert!(!is_blocked(&ban_ann(false, AdminUpdate::Done("Banned"))));
+        assert!(!is_blocked(&ban_ann(
+            true,
+            AdminUpdate::Failed("No".into())
+        )));
+    }
+
+    #[test]
+    fn the_card_blocks_and_unblocks_and_mutes_their_voice_here() {
+        let (mut harness, _sent, _other) = kick_harness(false);
+        let open_card = |harness: &mut Harness<'static, Option<Home>>| {
+            (harness.get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Ann")).click();
+            harness.run_steps(4);
+        };
+        open_card(&mut harness);
+        harness.get_by_label(t!("friends.block")).click();
+        harness.run_steps(4);
+        let home = harness.state().as_ref().unwrap();
+        assert!(home.is_blocked(&ANN));
+        assert!(home.voice.audio.mix().person(&ANN).voice.muted);
+        open_card(&mut harness);
+        assert!(shown(&harness, t!("friends.unblock")));
+        assert!(!shown(&harness, t!("pokes.poke")));
+        harness.get_by_label(t!("friends.unblock")).click();
+        harness.run_steps(4);
+        let home = harness.state().as_ref().unwrap();
+        assert!(!home.is_blocked(&ANN));
+        assert!(!home.voice.audio.mix().person(&ANN).voice.muted);
     }
 
     #[test]
