@@ -606,6 +606,10 @@ perm.move_members = Im Sprachkanal verschieben
 server.unknown_device = Unbekanntes Gerät
 server.member_unnamed = Mitglied {id}
 
+# crates/client/src/profile.rs
+names.no_links = Namen dürfen keine Links enthalten.
+names.invite_in_name = Das ist ein Einladungslink. Füge ihn stattdessen ins Einladungsfeld ein.
+
 # crates/client/src/net/admin.rs
 admin.failed = Das hat nicht geklappt. Versuche es noch einmal.
 admin.done_kicked = Vom Server entfernt.

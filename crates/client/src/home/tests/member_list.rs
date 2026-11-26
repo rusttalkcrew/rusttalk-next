@@ -371,3 +371,73 @@ fn member_list_builds_only_the_rows_in_view() {
         assert!(!names(&bottom).contains(&first.as_str()));
     }
 }
+
+/// A few fixture people, one named with an invite link, one with a web address and
+/// one with a very long name, each as the app receives it (#658).
+fn link_named(dir: &mut Directory) {
+    dir.me = ME;
+    dir.roles = Vec::new();
+    let link = "rusttalk://chat.example.test/i/AAAAAAAA#BBBBBBBB.CCCCCCCC.k~DDDDDDDD";
+    let long = "Captain Extraordinarily Long Display Name Who Never Stops Typing Letters \
+        Into The Name Field Of Every App Ever Made";
+    let member = |person: Id, name: &str| Member {
+        person,
+        name: crate::profile::received_name(Some(name.into())),
+        devices: Vec::new(),
+        roles: Vec::new(),
+        avatar: None,
+        presence: Presence::Online,
+        hide_offline: false,
+        bio: None,
+        voice_muted: false,
+    };
+    dir.members = vec![
+        member(ME, "Me"),
+        member([2; 32], "Ada"),
+        member([3; 32], link),
+        member([4; 32], "Visit www.example.test today"),
+        member([5; 32], long),
+        member([6; 32], "J. Smith"),
+    ]
+    .into();
+}
+
+#[test]
+fn member_list_shows_a_link_name_as_the_fallback() {
+    for dark in [true, false] {
+        let mut h = harness(1100.0, 700.0, dark);
+        link_named(&mut h.state_mut().servers[0].dir);
+        h.run_steps(4);
+        if let Some(dir) = std::env::var_os("RUSTTALK_LINK_NAME_SCREENSHOTS") {
+            let theme = if dark { "dark" } else { "light" };
+            h.render()
+                .unwrap()
+                .save(PathBuf::from(dir).join(format!("member-list-{theme}-1100x700.png")))
+                .unwrap();
+        }
+        let shown = rows(&h);
+        let shown = names(&shown);
+        let fallback = |n: u8| t!("server.member_unnamed", id = &fingerprint(&[n; 32])[..4]);
+        assert!(shown.contains(&fallback(3).as_str()), "{shown:?}");
+        assert!(shown.contains(&fallback(4).as_str()), "{shown:?}");
+        assert!(
+            shown.contains(&"Ada") && shown.contains(&"J. Smith"),
+            "{shown:?}"
+        );
+        // Nothing on screen, tooltips and labels included, shows the link.
+        for node in h.query_all(by()) {
+            let label = node.accesskit_node().label().unwrap_or_default();
+            assert!(!label.contains("://") && !label.contains("www."), "{label}");
+        }
+        // The long name is cut to what the name fields allow.
+        let long = shown
+            .iter()
+            .find(|name| name.starts_with("Captain"))
+            .unwrap();
+        assert_eq!(
+            long.chars().count(),
+            crate::profile::NAME_CHARS + 1,
+            "{long}"
+        );
+    }
+}

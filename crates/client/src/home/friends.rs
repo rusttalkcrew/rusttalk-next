@@ -185,7 +185,11 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
         .map(|(person, contact)| {
             let name = match home.dm_server(person) {
                 Some(_) => home.peer_name(person),
-                None if !contact.name.is_empty() => contact.name.clone(),
+                None if !contact.name.is_empty()
+                    && !rusttalk_core::names::contains_link(&contact.name) =>
+                {
+                    contact.name.clone()
+                }
                 None => home.peer_name(person),
             };
             (*person, contact.relation, name)

@@ -86,12 +86,15 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             let entered = submitted(ui, &field);
             ui::focus_when_none(ui, &field);
             let empty = name.trim().is_empty();
+            let problem = crate::profile::name_problem(name);
             if empty && !name.is_empty() {
                 error_text(ui, Some(t!("welcome.name_needed")));
             }
+            error_text(ui, problem.as_deref());
             ui.add_space(ui::SPACE_M);
-            let go = ui.add_enabled_ui(!empty, |ui| primary_large(ui, t!("home.continue")));
-            if !empty && (go.inner.clicked() || entered) {
+            let ok = !empty && problem.is_none();
+            let go = ui.add_enabled_ui(ok, |ui| primary_large(ui, t!("home.continue")));
+            if ok && (go.inner.clicked() || entered) {
                 next = Some(Some(name.trim().to_owned()));
             }
         }

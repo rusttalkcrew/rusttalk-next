@@ -609,6 +609,10 @@ perm.move_members = Move in voice
 server.unknown_device = Unknown device
 server.member_unnamed = Member {id}
 
+# crates/client/src/profile.rs
+names.no_links = Names can't contain links.
+names.invite_in_name = That's an invite link. Paste it in the invite field instead.
+
 # crates/client/src/net/admin.rs
 admin.failed = That didn't work. Try again.
 admin.done_kicked = Removed from the server.

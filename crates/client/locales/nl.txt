@@ -606,6 +606,10 @@ perm.move_members = Verplaatsen in spraak
 server.unknown_device = Onbekend apparaat
 server.member_unnamed = Lid {id}
 
+# crates/client/src/profile.rs
+names.no_links = Namen mogen geen links bevatten.
+names.invite_in_name = Dat is een uitnodigingslink. Plak hem in het uitnodigingsveld.
+
 # crates/client/src/net/admin.rs
 admin.failed = Dat lukte niet. Probeer het opnieuw.
 admin.done_kicked = Verwijderd uit de server.
