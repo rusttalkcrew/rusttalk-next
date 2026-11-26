@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The member list now shows people who are online first in each group, then Do not disturb, Away and offline, by name within each.
+
 ## v0.8.1 - 2026-11-26
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.
