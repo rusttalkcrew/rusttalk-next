@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Send up to 10 files in one message, so a whole photo collage fits in one album (on updated servers; others still take 4)
+- Clicking the line above a reply now jumps to the message it answers and briefly highlights it, loading older messages when needed; the line itself is calmer, with the person's picture and a short preview.
 
 ## v0.8.1 - 2026-11-26
 
