@@ -927,13 +927,7 @@ pub enum MediaAction {
 
 /// A picture's own items, above the message's in its menu.
 pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
-    let mut action = None;
-    if COPY_IMAGE && m.item("🖼", t!("files.copy_image")).clicked() {
-        action = Some(MediaAction::Copy);
-    }
-    if SAVE_DIALOG && m.item("⬇", t!("files.save_as")).clicked() {
-        action = Some(MediaAction::SaveAs);
-    }
+    let mut action = copy_save_items(m);
     if m.item("🔍", t!("files.open_viewer")).clicked() {
         action = Some(MediaAction::View);
     }
@@ -942,6 +936,19 @@ pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
     }
     if m.item("↗", t!("files.open_default")).clicked() {
         action = Some(MediaAction::Open);
+    }
+    action
+}
+
+/// "Copy image" and "Save as…", where the device can: a picture's menu in the chat and
+/// in the viewer.
+fn copy_save_items(m: &mut ui::Menu) -> Option<MediaAction> {
+    let mut action = None;
+    if COPY_IMAGE && m.item("🖼", t!("files.copy_image")).clicked() {
+        action = Some(MediaAction::Copy);
+    }
+    if SAVE_DIALOG && m.item("⬇", t!("files.save_as")).clicked() {
+        action = Some(MediaAction::SaveAs);
     }
     action
 }
@@ -1453,9 +1460,10 @@ pub fn media_kind(file: &Attachment) -> Option<MediaKind> {
     }
 }
 
-/// A picture or video cut to fill `rect`: its thumbnail, or its small animation playing
-/// when `play`, with a badge for a GIF, a video or another type and the download's
-/// progress. Shared by the gallery's tiles and a message's album.
+/// A picture or video cut to fill `rect`: its thumbnail (or, without one, its original
+/// decoded small), or its small animation playing when `play`, with a badge for a GIF,
+/// a video or another type and the download's progress. Shared by the gallery's tiles
+/// and a message's album.
 #[allow(clippy::too_many_arguments)]
 fn media_face(
     ui: &mut Ui,
@@ -1472,16 +1480,20 @@ fn media_face(
     painter.rect_filled(rect, radius, c.side);
     let now = ui.input(|input| input.time);
     let play = play && plays_inline(&file.name, &file.media_type, file.file.size.into());
-    if play {
+    // A picture sent without a thumbnail shows its original, decoded small, as in the
+    // chat; only while its cell is on screen.
+    let original = kind == MediaKind::Picture && shows_original(file);
+    if play || (original && ui.is_rect_visible(rect)) {
         files.want_inline_at(now, commands, file);
     }
-    let playing = match files.inline.get(&file.file.id) {
+    let loaded = match files.inline.get(&file.file.id) {
         Some(Inline {
             picture: Picture::Ready(anim),
             ..
-        }) if play => Some(anim.current(ui, true)),
+        }) if play || original => Some(anim),
         _ => None,
     };
+    let playing = loaded.filter(|_| play).map(|anim| anim.current(ui, true));
     if playing.is_none()
         && let Some(thumb) = &file.thumbnail
     {
@@ -1492,7 +1504,8 @@ fn media_face(
         .and_then(|thumb| match &thumb.picture {
             Picture::Ready(anim) => anim.frames.first(),
             _ => None,
-        });
+        })
+        .or_else(|| loaded.filter(|_| playing.is_none())?.frames.first());
     let shown = playing.or(still);
     if let Some(texture) = shown {
         let uv = fill_uv(texture.size_vec2(), rect.size());
@@ -2336,6 +2349,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 let room = ui.available_size();
                 let stage = ui.available_rect_before_wrap();
                 let view = files.viewer.as_ref().expect("checked above");
+                let mut picture = None;
                 match files.full.as_ref().map(|full| &full.picture) {
                     Some(Picture::Ready(anim)) => {
                         let texture = anim.current(ui, true);
@@ -2353,7 +2367,11 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                             let (rect, _) = ui.allocate_exact_size(area, Sense::hover());
                             // Match the painted bounds, including rotation and scroll offset.
                             let displayed = Rect::from_center_size(rect.center(), outline * scale);
-                            ui.interact(displayed, ui.scope_id().with("image"), Sense::click());
+                            picture = Some(ui.interact(
+                                displayed,
+                                ui.scope_id().with("image"),
+                                Sense::click(),
+                            ));
                             let unturned = Rect::from_center_size(rect.center(), size * scale);
                             Image::new(texture)
                                 .rotate(f32::from(view.turns) * FRAC_PI_2, Vec2::splat(0.5))
@@ -2368,6 +2386,30 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     }
                     _ => {
                         ui.centered_and_justified(|ui| ui.spinner());
+                    }
+                }
+                // The picture's menu: right click, or a long press on a touch screen.
+                if let Some(picture) = picture {
+                    let picked = ui::context_menu(&picture, |m| {
+                        let action = copy_save_items(m);
+                        // Phones can't copy pictures or open a save dialog: they hand
+                        // the file to the system, as the toolbar's button does.
+                        let export =
+                            export_label().is_some_and(|label| m.item("⬇", label).clicked());
+                        (action, export)
+                    });
+                    match picked {
+                        Some((Some(action), _)) => {
+                            let media = Media {
+                                address: address.clone(),
+                                commands: commands.clone(),
+                                saved: files.saved_at(&file).cloned(),
+                                file: file.clone(),
+                            };
+                            files.media_action(ctx, action, &media);
+                        }
+                        Some((None, true)) => files.export(ctx, &address, &file),
+                        _ => {}
                     }
                 }
                 // Previous and next through the gallery, over the picture's sides: always
