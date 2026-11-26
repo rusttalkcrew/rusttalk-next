@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The sticker and emoji picker has a row of tabs (recent stickers and one per pack) over a grid of four large stickers, and animated stickers and emoji play all the time. On phones it opens in place of the keyboard, and a tapped sticker shows large above the message box first: tap it again or press send to send it.
+
 ## v0.8.1 - 2026-11-26
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.
