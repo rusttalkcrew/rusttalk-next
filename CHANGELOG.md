@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.
+- On phones the sticker and emoji panel and the keyboard no longer show together: tapping the message box swaps the panel for the keyboard, and tapping the chat closes the panel. On a computer, clicking the message box keeps the picker open. A long-pressed message stays highlighted while its menu is open.
 
 ## v0.9.0 - 2026-11-26
 

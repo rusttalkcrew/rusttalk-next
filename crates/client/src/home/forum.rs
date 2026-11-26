@@ -1041,7 +1041,8 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
             folds.open.insert(post);
             folds.answering = Some(post);
             chat.reacting = Some(id);
-            home.emoji_picker.open_for_reaction();
+            home.emoji_picker
+                .open_for_reaction(ui.ctx(), composer_id(channel));
         }
         Some(Asked::Pick(_, Pick::AddReaction(_))) => {}
         // A post's answers are all shown when it is open: no paging to do.

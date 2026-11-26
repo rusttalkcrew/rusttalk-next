@@ -219,3 +219,125 @@ fn picker_screenshots() {
         }
     }
 }
+
+/// The message box.
+fn message_box() -> egui_kittest::kittest::By<'static> {
+    egui_kittest::kittest::by().role(egui::accesskit::Role::MultilineTextInput)
+}
+
+fn box_focused(h: &Harness<'static, Option<Home>>) -> bool {
+    h.ctx.memory(|m| m.has_focus(composer_id(PROJECTS)))
+}
+
+/// A spot in the (empty) chat, above the composer.
+const CHAT: egui::Pos2 = egui::pos2(195.0, 120.0);
+
+fn tap(h: &mut Harness<'static, Option<Home>>, pos: egui::Pos2) {
+    use egui::TouchPhase;
+    super::touch::finger(h, TouchPhase::Start, pos);
+    super::touch::finger(h, TouchPhase::End, pos);
+    h.run_steps(3);
+}
+
+/// Panel and keyboard are never up together on a phone (#653).
+#[test]
+fn phone_box_swaps_the_panel_for_the_keyboard() {
+    let (mut h, _sent) = harness(true, PHONE);
+    open_stickers(&mut h);
+    assert!(h.query_by_label(":big_hug:").is_some());
+    assert!(!box_focused(&h));
+    // Finger down and up on separate frames, as on an iPhone.
+    let field = h.get(message_box()).rect().center();
+    tap(&mut h, field);
+    assert!(h.query_by_label(":big_hug:").is_none(), "the panel closed");
+    assert!(box_focused(&h), "the box has focus, so the keyboard is up");
+    assert!(h.output().platform_output.ime.is_some());
+
+    // Opening it again takes the focus, so the keyboard goes away.
+    let button = h.get_by_label(t!("home.sticker_picker")).rect().center();
+    tap(&mut h, button);
+    assert!(h.query_by_label(":big_hug:").is_some());
+    assert!(!box_focused(&h));
+    assert!(
+        h.output().platform_output.ime.is_none(),
+        "no keyboard under the panel"
+    );
+}
+
+#[test]
+fn phone_tap_outside_closes_the_panel() {
+    let (mut h, _sent) = harness(true, PHONE);
+    open_stickers(&mut h);
+    // A tap on a sticker previews it and the panel stays.
+    h.get_by_label(":big_hug:").click();
+    h.run_steps(3);
+    assert!(h.query_by_label(":cheers:").is_some());
+    tap(&mut h, CHAT);
+    assert!(
+        h.query_by_label(":big_hug:").is_none(),
+        "a tap on the chat closes it"
+    );
+    assert!(h.query_by_label(&preview_label("big_hug")).is_none());
+    assert!(!box_focused(&h));
+}
+
+#[test]
+fn desktop_box_click_keeps_the_popover() {
+    let (mut h, _sent) = harness(true, DESKTOP);
+    open_stickers(&mut h);
+    h.get(message_box()).click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label(":big_hug:").is_some(),
+        "the box keeps it open"
+    );
+    assert!(box_focused(&h));
+    // Typing goes on with it open.
+    h.get(message_box()).type_text("hi ");
+    h.run_steps(2);
+    assert!(h.query_by_label(":big_hug:").is_some());
+    let pos = egui::pos2(300.0, 200.0);
+    h.hover_at(pos);
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run_steps(3);
+    assert!(
+        h.query_by_label(":big_hug:").is_none(),
+        "an outside click closes it"
+    );
+}
+
+#[test]
+fn keyboard_screenshots() {
+    let Some(dir) = std::env::var_os("RUSTTALK_PICKER_KEYBOARD_SCREENSHOTS").map(PathBuf::from)
+    else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (theme, dark) in [("dark", true), ("light", false)] {
+        let (mut h, _sent) = harness(dark, PHONE);
+        super::touch::add_chat(&mut h);
+        // Typing first, then the panel: it takes the keyboard's place.
+        let field = h.get(message_box()).rect().center();
+        tap(&mut h, field);
+        h.get(message_box()).type_text("Party time ");
+        h.run_steps(2);
+        let button = h.get_by_label(t!("home.sticker_picker")).rect().center();
+        tap(&mut h, button);
+        h.run_steps(4);
+        assert!(h.output().platform_output.ime.is_none());
+        (h.render().unwrap())
+            .save(dir.join(format!("phone-390x844-{theme}-panel-without-keyboard.png")))
+            .unwrap();
+    }
+}
