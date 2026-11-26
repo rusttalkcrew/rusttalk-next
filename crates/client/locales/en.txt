@@ -1201,6 +1201,8 @@ files.open_default = Open in default app
 files.copy_image = Copy image
 files.save_as = Save as…
 files.open_viewer = Open in viewer
+files.album_more.one = {count} more
+files.album_more.other = {count} more
 files.save_to_phone = Save to phone
 files.share = Share…
 files.saved_to_downloads = Saved to Downloads
@@ -1221,6 +1223,7 @@ gallery.shared_by = {name} · {time}
 gallery.jump = Jump to message
 gallery.previous = Previous
 gallery.next = Next
+gallery.position = {at} / {total}
 
 # crates/client/src/crop.rs
 crop.open_failed = Couldn't open that file.
