@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.
+- Large phone photos (up to 48 MP and wide panoramas) now show as pictures with a preview, the right way up, instead of as a file; files waiting to be sent show as equal tiles you can scroll through.
 
 ## v0.8.0 - 2026-11-26
 

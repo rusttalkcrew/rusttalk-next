@@ -63,6 +63,8 @@ pub const MAX_FILES: usize = 4;
 pub(crate) const THUMBNAIL: f32 = 320.0;
 /// Animated GIFs and WebPs up to this size load by themselves and play in the chat.
 const INLINE_MAX: u64 = 8 * MIB;
+/// Pictures without a thumbnail up to this size load their original to show in the chat.
+const ORIGINAL_MAX: u64 = 32 * MIB;
 /// Animations playing in the chat at once; the ones scrolled away drop first.
 const MAX_INLINE: usize = 8;
 /// An animation unseen this long (seconds) may be dropped when others need the room.
@@ -1214,42 +1216,39 @@ pub fn keep_previews(ctx: &egui::Context, staged: &[Staged]) {
     }
 }
 
-/// The staged files in the composer: pictures as tiles that play on hover and open
-/// large on click, other files as a chip with the name and size. Each has a remove button.
+/// The staged files in the composer, as equal square tiles in a row that scrolls
+/// sideways: pictures show themselves, play on hover and open large on click; other
+/// files, and pictures that can't be shown, show an icon with their name and size.
+/// Each has a remove button in its corner.
 pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     let previews = Previews::get(ui.ctx());
     let open_id = UiId::unique("staged-open");
     previews.keep(&chat.staged);
     let mut remove = None;
     let mut open = None;
-    ui.horizontal_wrapped(|ui| {
-        for (at, file) in chat.staged.iter().enumerate() {
-            let tile = is_picture(&file.name)
-                && previews.with(ui, &file.path, false, |ui, anim, failed| {
-                    if failed {
-                        return false;
-                    }
-                    let (shown, removed) = picture_tile(ui, file, anim);
+    ScrollArea::horizontal()
+        .id_salt("staged-files")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (at, file) in chat.staged.iter().enumerate() {
+                    let (shown, removed) = if is_picture(&file.name) {
+                        previews.with(ui, &file.path, false, |ui, anim, failed| {
+                            let look = match anim {
+                                Some(anim) => Tile::Picture(anim),
+                                None if failed => Tile::File,
+                                None => Tile::Loading,
+                            };
+                            staged_tile(ui, file, look)
+                        })
+                    } else {
+                        staged_tile(ui, file, Tile::File)
+                    };
                     open = open.or(shown.then_some(at));
                     remove = remove.or(removed.then_some(at));
-                    true
-                });
-            if tile {
-                continue;
-            }
-            Frame::new()
-                .fill(ui::colors(ui).field)
-                .corner_radius(ui::RADIUS)
-                .inner_margin(Margin::symmetric(8, 4))
-                .show(ui, |ui| {
-                    ui.label(format!("📎 {}", file.name));
-                    ui.label(ui::caption(size(file.size)));
-                    if ui::small_close(ui, t!("common.remove")).clicked() {
-                        remove = Some(at);
-                    }
-                });
-        }
-    });
+                }
+            });
+        });
     if let Some(at) = open {
         ui.data_mut(|data| data.insert_temp(open_id, chat.staged[at].path.clone()));
     }
@@ -1270,14 +1269,35 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     }
 }
 
-/// A staged picture's tile: cropped to a square, playing while hovered, with a ×.
-/// Returns whether it was clicked and whether × was.
-fn picture_tile(ui: &mut Ui, file: &Staged, anim: Option<&Anim>) -> (bool, bool) {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(PREVIEW), Sense::click());
+/// What a staged file's tile shows.
+enum Tile<'a> {
+    Picture(&'a Anim),
+    Loading,
+    /// An icon with the name and size: not a picture, or one that can't be shown.
+    File,
+}
+
+/// A staged file's square tile with a × in its corner. A picture is cropped to the
+/// square and plays while hovered. Returns whether a picture was clicked and whether
+/// × was.
+fn staged_tile(ui: &mut Ui, file: &Staged, look: Tile) -> (bool, bool) {
+    let picture = matches!(look, Tile::Picture(_));
+    let sense = if picture {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(PREVIEW), sense);
     let c = ui::colors(ui);
-    ui.painter().rect_filled(rect, ui::RADIUS, c.field);
-    match anim {
-        Some(anim) => {
+    ui.painter().rect(
+        rect,
+        ui::RADIUS,
+        c.raised,
+        egui::Stroke::new(1.0, c.border),
+        egui::StrokeKind::Inside,
+    );
+    match look {
+        Tile::Picture(anim) => {
             let texture = anim.current(ui, response.hovered());
             let size = texture.size_vec2();
             // Cover the square: crop the longer side around the middle.
@@ -1297,17 +1317,33 @@ fn picture_tile(ui: &mut Ui, file: &Staged, anim: Option<&Anim>) -> (bool, bool)
                 });
             }
         }
-        None => {
+        Tile::Loading => {
             ui.put(rect, egui::Spinner::new());
+        }
+        Tile::File => {
+            let inner = rect.shrink(ui::SPACE_S);
+            let layout = Layout::bottom_up(Align::Min);
+            ui.scope_builder(UiBuilder::new().max_rect(inner).layout(layout), |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(egui::Label::new(ui::caption(size(file.size))).selectable(false));
+                ui.add(egui::Label::new(&file.name).truncate().selectable(false));
+                ui.add_space(ui::SPACE_XS);
+                ui.label(RichText::new("📄").size(ui::TEXT_ICON_LARGE));
+            });
         }
     }
     ui::focus_ring(ui, &response, ui::RADIUS);
     let label = format!("{} · {}", file.name, size(file.size));
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-    let shown = response
-        .on_hover_text(&label)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked();
+    let role = if picture { Role::Button } else { Role::Image };
+    response.widget_info(|| WidgetInfo::labeled(role, true, &label));
+    let response = response.on_hover_text(&label);
+    let shown = if picture {
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    } else {
+        false
+    };
     let corner = Rect::from_min_size(rect.right_top() + Vec2::new(-26.0, 4.0), Vec2::splat(22.0));
     let removed = ui
         .scope_builder(UiBuilder::new().max_rect(corner), |ui| {
@@ -1376,6 +1412,12 @@ fn plays_inline(name: &str, media_type: &str, size: u64) -> bool {
 /// Whether a file is a small animation that plays by itself where it shows.
 pub fn animates(file: &Attachment) -> bool {
     plays_inline(&file.name, &file.media_type, file.file.size.into())
+}
+
+/// Whether a picture without a thumbnail loads its original to show in the chat:
+/// older apps sent large phone photos without one.
+fn shows_original(file: &Attachment) -> bool {
+    file.thumbnail.is_none() && is_picture(&file.name) && u64::from(file.file.size) <= ORIGINAL_MAX
 }
 
 /// What a file is in a channel's gallery.
@@ -1809,8 +1851,10 @@ pub fn shown_attachments(
         list
     };
     for file in list {
-        let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
-        // Files sent before thumbnails existed for GIFs have none; they still play.
+        let play = plays_inline(&file.name, &file.media_type, file.file.size.into())
+            || shows_original(file);
+        // Files sent before thumbnails existed for GIFs, or large photos older apps
+        // could not make one for, have none; they show their original instead.
         if file.thumbnail.is_none() && !play {
             card(ui, files, address, file);
             continue;
@@ -2814,6 +2858,29 @@ mod tests {
         // Older apps never test this and show the file; anything else stays a file here too.
         assert!(!is_card(&file(link_cards::MEDIA_TYPE, 5000)));
         assert!(!is_card(&file("application/json", 300)));
+    }
+
+    #[test]
+    fn photos_sent_without_a_thumbnail_show_their_original() {
+        let file = |name: &str, size, thumbnail: bool| Attachment {
+            file: {
+                let mut blob = rusttalk_core::client::BlobRef::for_tests([1; 32]);
+                blob.size = size;
+                blob
+            },
+            name: name.into(),
+            media_type: "image/jpeg".into(),
+            thumbnail: thumbnail.then(|| rusttalk_core::client::BlobRef::for_tests([2; 32])),
+        };
+        let size = 6 * MIB as u32;
+        assert!(shows_original(&file("IMG_2676.jpeg", size, false)));
+        assert!(!shows_original(&file("IMG_2676.jpeg", size, true)));
+        assert!(!shows_original(&file("IMG_2676.HEIC", size, false)));
+        assert!(!shows_original(&file(
+            "big.jpg",
+            ORIGINAL_MAX as u32 + 1,
+            false
+        )));
     }
 
     #[test]
