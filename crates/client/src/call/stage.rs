@@ -1177,7 +1177,14 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
         return;
     };
     let shown = ctx.data(|data| data.get_temp::<u64>(UiId::unique("self camera shown")));
-    let screen = ctx.content_rect();
+    // Android doesn't update the content rect when the phone turns (winit), so a stale
+    // one that no longer fits the window gives way to the window itself.
+    let (content, window) = (ctx.content_rect(), ctx.viewport_rect());
+    let screen = if window.contains_rect(content) {
+        content
+    } else {
+        window
+    };
     // A phone turned sideways, as for a full-screen stream, is wider than a phone. Phones
     // count as touch screens from the start, before egui has seen a touch.
     let touch = cfg!(any(target_os = "android", target_os = "ios"))
