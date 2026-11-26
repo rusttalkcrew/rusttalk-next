@@ -3590,8 +3590,9 @@ fn member_face_speaking(
 }
 
 /// The member list's grouping: who is listed, under which heading, in display order.
-/// Kept between frames and rebuilt only when the members, the separately listed roles
-/// or who this is change, so a big server isn't regrouped every frame.
+/// Kept between frames and rebuilt only when the members (their presence too), the
+/// separately listed roles or who this is change, so a big server isn't regrouped or
+/// re-sorted every frame.
 struct MemberGroups {
     generation: u64,
     me: Id,
@@ -3624,6 +3625,19 @@ impl MemberGroups {
                 .and_then(|role| separate.iter().position(|id| *id == role.id))
                 .unwrap_or(separate.len());
             groups[group].1.push(at);
+        }
+        // Online first, then Do not disturb, Away and Offline; by name within each.
+        for (_, list) in &mut groups {
+            list.sort_by_cached_key(|&at| {
+                let member = &dir.members[at];
+                let status = match member.presence {
+                    Presence::Online => 0,
+                    Presence::Dnd => 1,
+                    Presence::Away => 2,
+                    Presence::Offline => 3,
+                };
+                (status, member.display_name().to_lowercase())
+            });
         }
         MemberGroups {
             generation: dir.members.generation(),

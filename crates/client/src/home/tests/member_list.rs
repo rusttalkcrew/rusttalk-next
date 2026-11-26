@@ -44,10 +44,11 @@ fn crowd(dir: &mut Directory) {
             devices: Vec::new(),
             roles,
             avatar: None,
-            presence: if n.is_multiple_of(3) {
-                Presence::Offline
-            } else {
-                Presence::Online
+            presence: match n {
+                _ if n.is_multiple_of(3) => Presence::Offline,
+                _ if n % 7 == 1 => Presence::Away,
+                _ if n % 4 == 2 => Presence::Dnd,
+                _ => Presence::Online,
             },
             hide_offline: n.is_multiple_of(9),
             bio: None,
@@ -62,7 +63,8 @@ fn crowd(dir: &mut Directory) {
     dir.members = std::iter::once(me).chain((1..=CROWD).map(member)).collect();
 }
 
-/// The grouping as `member_list` built it every frame before it was cached.
+/// The grouping as `member_list` built it every frame before it was cached, plus the
+/// status-then-name order inside each group.
 fn old_grouping(dir: &Directory) -> Vec<(Option<String>, Vec<Id>)> {
     let listed: Vec<&Member> = (dir.members.iter())
         .filter(|m| m.listed() || m.person == dir.me)
@@ -77,6 +79,19 @@ fn old_grouping(dir: &Directory) -> Vec<(Option<String>, Vec<Id>)> {
         if let Some((_, list)) = groups.iter_mut().find(|(id, _)| *id == heading) {
             list.push(member);
         }
+    }
+    let status = |m: &Member| {
+        [
+            Presence::Online,
+            Presence::Dnd,
+            Presence::Away,
+            Presence::Offline,
+        ]
+        .iter()
+        .position(|p| *p == m.presence)
+    };
+    for (_, list) in &mut groups {
+        list.sort_by_key(|m| (status(m), m.display_name().to_lowercase()));
     }
     (groups.into_iter())
         .map(|(id, list)| {
@@ -121,6 +136,70 @@ fn member_groups_match_the_old_grouping() {
     assert_eq!(new_grouping(&dir), old_grouping(&dir));
     dir.members = crate::server::Members::default();
     assert_eq!(new_grouping(&dir), old_grouping(&dir));
+}
+
+#[test]
+fn member_groups_list_online_then_dnd_then_away_then_offline_by_name() {
+    let mut dir = Directory {
+        me: ME,
+        roles: vec![role("admin", "Admins", None, true)],
+        ..Default::default()
+    };
+    let member = |n: u8, name: &str, presence: Presence, admin: bool| Member {
+        person: [n; 32],
+        name: Some(name.into()),
+        devices: Vec::new(),
+        roles: if admin {
+            vec!["admin".into()]
+        } else {
+            Vec::new()
+        },
+        avatar: None,
+        presence,
+        hide_offline: false,
+        bio: None,
+        voice_muted: false,
+    };
+    dir.members = vec![
+        member(1, "zoe", Presence::Offline, false),
+        member(2, "Yara", Presence::Away, false),
+        member(3, "xavi", Presence::Dnd, false),
+        member(4, "Will", Presence::Online, false),
+        member(5, "anna", Presence::Offline, false),
+        member(6, "Bob", Presence::Away, false),
+        member(7, "carl", Presence::Dnd, false),
+        member(8, "Dana", Presence::Online, false),
+        member(9, "Ola", Presence::Offline, true),
+        member(10, "Pim", Presence::Online, true),
+    ]
+    .into();
+    let names = |dir: &Directory| -> Vec<Vec<String>> {
+        (MemberGroups::of(dir).groups.iter())
+            .map(|(_, list)| {
+                list.iter()
+                    .map(|&at| dir.members[at].display_name())
+                    .collect()
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(&dir),
+        [
+            vec!["Pim", "Ola"],
+            vec!["Dana", "Will", "carl", "xavi", "Bob", "Yara", "anna", "zoe"],
+        ]
+    );
+    // Presence changes re-sort: anna comes online, Dana goes offline.
+    let ctx = egui::Context::default();
+    let before = MemberGroups::cached(&ctx, &dir);
+    dir.members.edit()[4].presence = Presence::Online;
+    dir.members.edit()[7].presence = Presence::Offline;
+    let after = MemberGroups::cached(&ctx, &dir);
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert_eq!(
+        names(&dir)[1],
+        ["anna", "Will", "carl", "xavi", "Bob", "Yara", "Dana", "zoe"]
+    );
 }
 
 #[test]
