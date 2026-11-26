@@ -414,6 +414,7 @@ mod tests {
             open_joining: false,
             version: None,
             protocol: Some(3),
+            max_files: None,
         }
     }
 

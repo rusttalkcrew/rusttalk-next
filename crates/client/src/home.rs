@@ -615,6 +615,18 @@ impl Home {
     }
 
     /// Servers this person is a member of too, where a DM with them can go.
+    /// Stored files a message to `at` may carry: a DM goes to every shared server, so
+    /// the fewest any of them takes.
+    pub(crate) fn max_files(&self, at: At) -> usize {
+        match at {
+            At::Channel(index, _) => self.servers[index].max_files,
+            At::Dm(peer) => (self.shared(&peer).into_iter())
+                .map(|index| self.servers[index].max_files)
+                .min()
+                .unwrap_or(rusttalk_core::messages::LEGACY_MAX_ATTACHMENTS),
+        }
+    }
+
     fn shared(&self, peer: &Id) -> Vec<usize> {
         (0..self.servers.len())
             .filter(|index| self.servers[*index].member(peer).is_some())
@@ -1426,6 +1438,11 @@ impl Home {
                     self.servers[index].compatibility = compatibility;
                 }
             }
+            Update::MaxFiles(address, max) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index].max_files = max;
+                }
+            }
             Update::ChannelOrderUnavailable(address) => {
                 if let Some(index) = self.index(&address) {
                     self.servers[index].order_unavailable = true;
@@ -2037,6 +2054,7 @@ impl Home {
                 };
                 let me = self.servers[index].dir.me;
                 let server = &mut self.servers[index];
+                let max = server.max_files;
                 let chat = match draft.peer {
                     Some(peer) => &mut self.threads.entry(peer).or_default().chat,
                     None => server.chats.entry(draft.channel).or_default(),
@@ -2052,7 +2070,7 @@ impl Home {
                     chat.open_draft(&server.dir, &draft.text);
                     chat.reply_to = draft.reply_to;
                     chat.editing = draft.edit_of;
-                    files::stage(chat, draft.files);
+                    files::stage(chat, draft.files, max);
                 }
             }
             Update::Failed(error) => {
@@ -2161,8 +2179,9 @@ pub fn show(
             continue;
         }
         if let Ask::AttachDm(peer) = ask {
+            let max = home.max_files(At::Dm(peer));
             let chat = &mut home.threads.entry(peer).or_default().chat;
-            if let Some(problem) = files::stage(chat, paths) {
+            if let Some(problem) = files::stage(chat, paths, max) {
                 home.toast = Some((problem, now + 6.0));
             }
             continue;
@@ -2185,8 +2204,9 @@ pub fn show(
         let server = &mut home.servers[index];
         match ask {
             Ask::Attach(_, channel) | Ask::PagePictures(_, channel) => {
+                let max = server.max_files;
                 let chat = server.chats.entry(channel).or_default();
-                if let Some(problem) = files::stage(chat, paths) {
+                if let Some(problem) = files::stage(chat, paths, max) {
                     home.toast = Some((problem, now + 6.0));
                 }
             }
@@ -4182,6 +4202,7 @@ pub(crate) fn new_server(
         label: label.into(),
         status: Status::Connecting,
         compatibility: Compatibility::default(),
+        max_files: rusttalk_core::messages::LEGACY_MAX_ATTACHMENTS,
         order_unavailable: false,
         dir: Directory::default(),
         chats: HashMap::new(),
@@ -4659,12 +4680,13 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         .filter(|file| !files::is_card(file) && !removed.contains(&file.file.id))
         .cloned()
         .collect();
-    let room = files::MAX_FILES.saturating_sub(kept.len());
+    let max = server.max_files;
+    let room = max.saturating_sub(kept.len());
     if chat.staged.len() > room {
         for file in chat.staged.drain(room..) {
             files::discard(&file.path);
         }
-        *toast = Some((t!("files.too_many", max = files::MAX_FILES), now + 6.0));
+        *toast = Some((t!("files.too_many", max = max), now + 6.0));
     }
     let mut save = false;
     let mut cancel = false;
@@ -4812,7 +4834,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                 let card = (page.into_iter().flat_map(|msg| &msg.files)).find(|file| {
                     files::is_card(file) && link.is_some() && files.card_url(&file.file.id) == link
                 });
-                if keep.len() + chat.staged.len() < files::MAX_FILES {
+                if keep.len() + chat.staged.len() < max {
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
@@ -4976,6 +4998,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     };
     // Every shared server is gone: what was loaded stays readable.
     let read_only = matches!(at, At::Dm(peer) if home.shared(&peer).is_empty());
+    let max_files = home.max_files(at);
     let (relation, request) = match at {
         At::Dm(peer) => (
             home.friends.relation(&peer),
@@ -5049,7 +5072,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     });
     if online
         && !dropped.is_empty()
-        && let Some(problem) = files::stage(chat, dropped)
+        && let Some(problem) = files::stage(chat, dropped, max_files)
     {
         *toast = Some((problem, now + 6.0));
     }
@@ -5159,7 +5182,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         (None, ..) => {}
     }
     if online && hovered {
-        drop_zone(ui, &title);
+        drop_zone(ui, &title, max_files);
     }
     // The server a message's files and live offer come from.
     let holder = |msg: &Msg| {
@@ -5597,7 +5620,7 @@ fn own_files(messages: &[Msg], id: &Id) -> Vec<Id> {
 
 /// What files dragged over the chat would do: the chat dimmed behind an accent
 /// frame that says where they go. On top, because the messages are drawn after it.
-fn drop_zone(ui: &Ui, title: &str) {
+fn drop_zone(ui: &Ui, title: &str, max_files: usize) {
     let rect = ui.max_rect().shrink(8.0);
     let colors = ui::colors(ui);
     let accent = ui::accent(ui);
@@ -5629,7 +5652,7 @@ fn drop_zone(ui: &Ui, title: &str) {
     painter.text(
         center + Vec2::new(0.0, 42.0),
         Align2::CENTER_CENTER,
-        t!("home.drop_hint", max = files::MAX_FILES),
+        t!("home.drop_hint", max = max_files),
         FontId::proportional(ui::TEXT_BODY),
         colors.muted,
     );

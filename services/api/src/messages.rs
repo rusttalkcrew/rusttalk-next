@@ -24,8 +24,8 @@ use crate::{
 };
 
 /// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys,
-/// and 512 for a page's kept files.
-pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 1024;
+/// and 1,024 for a page's kept files.
+pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 1536;
 const PAGE_LIMIT: i64 = 100;
 
 #[derive(Deserialize)]
@@ -509,7 +509,7 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-const _: () = assert!(BODY_LIMIT == 15_360);
+const _: () = assert!(BODY_LIMIT == 20_104);
 
 #[cfg(test)]
 mod tests {

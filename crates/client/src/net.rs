@@ -30,7 +30,7 @@ use rusttalk_core::{
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
-    messages::PollPart,
+    messages::{LEGACY_MAX_ATTACHMENTS, PollPart},
     presence::{Presence, PresenceEvent, Status as Choice, Update as Pushed},
 };
 use serde_json::Value;
@@ -416,6 +416,8 @@ pub enum Update {
     Inaccessible(Url, HashSet<Id>),
     ResetHistory(Url, Vec<(Id, Vec<Msg>)>),
     Compatibility(Url, Compatibility),
+    /// Stored files per message the server takes.
+    MaxFiles(Url, usize),
     ChannelOrderUnavailable(Url),
     Directory(Url, Box<Directory>),
     /// How a change to the events went.
@@ -847,6 +849,8 @@ struct State {
     /// Provenance for loaded history, including older pages outside the startup cache.
     sources: HashMap<Id, HashSet<recent::Source>>,
     dm_backfill: bool,
+    /// Stored files per message the server takes (`ServerInfo::max_files`).
+    max_files: usize,
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
     /// Records that waited for a channel key, retried after key work.
@@ -949,6 +953,7 @@ async fn run(
         server_id: server.server_id,
         rooms: HashMap::new(),
         voice: None,
+        max_files: LEGACY_MAX_ATTACHMENTS,
         ..State::default()
     };
     let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
@@ -1026,7 +1031,7 @@ async fn run(
             );
             async move {
                 let attempt = async {
-                    let (api, session, dm_backfill) =
+                    let (api, session, features) =
                         session(ctx, server, api, admission.as_ref()).await?;
                     if admission.take().is_some() {
                         tracing::info!(server = %fingerprint(&server.server_id), "joined server");
@@ -1044,7 +1049,7 @@ async fn run(
                         verified,
                     )
                     .await;
-                    Ok::<_, Failure>((client, pins, dm_backfill))
+                    Ok::<_, Failure>((client, pins, features))
                 };
                 tokio::select! {
                     biased;
@@ -1083,8 +1088,9 @@ async fn run(
         let mut route_changed = false;
         let mut stopped = Vec::new();
         match connected {
-            Ok((connected, pins, dm_backfill)) => {
+            Ok((connected, pins, (dm_backfill, max_files))) => {
                 state.dm_backfill = dm_backfill;
+                state.max_files = max_files;
                 state.pins_lost = pins.is_none();
                 state.pins_saved = pins.unwrap_or_default();
                 match connected {
@@ -1446,7 +1452,7 @@ async fn session<'a>(
     server: &KnownServer,
     api: &'a mut Option<Api>,
     admission: Option<&Admission>,
-) -> Result<(&'a Api, Session, bool), Failure> {
+) -> Result<(&'a Api, Session, (bool, usize)), Failure> {
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
             tracing::error!(error = %format_args!("{error:#}"), "server pins differ");
@@ -1469,9 +1475,11 @@ async fn session<'a>(
     }
     let api = api.as_mut().expect("set above");
     let mut dm_backfill = false;
+    let mut max_files = LEGACY_MAX_ATTACHMENTS;
     let protocol = match api.info().await {
         Ok(info) => {
             dm_backfill = info.dm_backfill;
+            max_files = info.max_files();
             Some(info.protocol)
         }
         Err(error) if pin_changed(&error) => return Err(stop_or_retry(error)),
@@ -1488,6 +1496,7 @@ async fn session<'a>(
             None
         }
     };
+    ctx.send(Update::MaxFiles(server.address.clone(), max_files));
     if let Some(protocol) = protocol {
         let compatibility = Compatibility::for_protocol(protocol);
         ctx.send(Update::Compatibility(server.address.clone(), compatibility));
@@ -1510,7 +1519,7 @@ async fn session<'a>(
             .map_err(|error| stop_or_retry(error.without_url().into()))?;
         // Refresh only at sign-in. Missing server info keeps this session on v2 envelopes.
         api.protocol = protocol.flatten().unwrap_or(1);
-        return Ok((api, session, dm_backfill));
+        return Ok((api, session, (dm_backfill, max_files)));
     }
     let code = reply
         .json::<Value>()
@@ -2819,10 +2828,11 @@ async fn on_command(
                 draft.inline.clone(),
             );
             let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
+            let max = state.max_files;
             state.jobs.upload(draft, sent, target, async move {
                 let mut body = body;
                 let leftover =
-                    files::upload_all(&ctx, &url, &blobs, channel, &mut body, uploads).await;
+                    files::upload_all(&ctx, &url, &blobs, (channel, max), &mut body, uploads).await;
                 (body, leftover)
             });
         }

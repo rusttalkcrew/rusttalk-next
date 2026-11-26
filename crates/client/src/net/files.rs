@@ -346,7 +346,8 @@ pub(super) async fn upload_all(
     ctx: &Ctx,
     url: &Url,
     client: &FileClient,
-    channel: Id,
+    // With the server's stored files per message.
+    (channel, max): (Id, usize),
     body: &mut MessageBody,
     (files, preview, inline): Uploads,
 ) -> Option<Vec<Attachment>> {
@@ -376,7 +377,7 @@ pub(super) async fn upload_all(
     }
     // A preview that didn't make it is removed only after the message went out.
     let mut leftover = Vec::new();
-    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES) {
+    if let Some(made) = preview.filter(|_| body.attachments.len() < max) {
         match upload_preview(client, &channel, made).await {
             Preview::Sent(attachment) => body.attachments.push(attachment),
             Preview::Left(prepared) => leftover.extend(prepared),
@@ -385,7 +386,7 @@ pub(super) async fn upload_all(
     // Emoji and stickers from other servers go along as small files of their own type.
     for picture in inline
         .iter()
-        .take(crate::files::MAX_FILES.saturating_sub(body.attachments.len()))
+        .take(max.saturating_sub(body.attachments.len()))
     {
         match upload_inline(client, &channel, picture).await {
             Ok(attachment) => body.attachments.push(attachment),

@@ -734,7 +734,7 @@ mod tests {
         body.attachments.push(body.attachments[0].clone());
         assert_eq!(body.encode(2).err(), Some(MessageError::Attachment));
         assert_eq!(
-            MessageBody::decode(2, &[0, 0, 0, 5]).err(),
+            MessageBody::decode(2, &[0, 0, 0, 11]).err(),
             Some(MessageError::Attachment)
         );
 

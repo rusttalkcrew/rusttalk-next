@@ -600,7 +600,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     if online
         && folds.answering.is_some()
         && !dropped.is_empty()
-        && let Some(problem) = files::stage(chat, dropped)
+        && let Some(problem) = files::stage(chat, dropped, home.servers[index].max_files)
     {
         home.toast = Some((problem, now + 6.0));
     }

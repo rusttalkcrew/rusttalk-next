@@ -89,6 +89,19 @@ pub struct ServerInfo {
     pub open_joining: bool,
     pub version: Option<String>,
     pub protocol: Option<u32>,
+    /// Stored files a message may carry here; servers that leave it out take four.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_files: Option<u8>,
+}
+
+impl ServerInfo {
+    /// Stored files per message this server accepts, within what this app can send.
+    pub fn max_files(&self) -> usize {
+        use crate::messages::{LEGACY_MAX_ATTACHMENTS, MAX_ATTACHMENTS};
+        self.max_files.map_or(LEGACY_MAX_ATTACHMENTS, |max| {
+            (max as usize).clamp(LEGACY_MAX_ATTACHMENTS, MAX_ATTACHMENTS)
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +334,19 @@ impl std::fmt::Display for InviteLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn servers_without_max_files_take_four() {
+        let info = |json| {
+            serde_json::from_str::<ServerInfo>(json)
+                .unwrap()
+                .max_files()
+        };
+        assert_eq!(info(r#"{"open_joining":true}"#), 4);
+        assert_eq!(info(r#"{"open_joining":true,"max_files":10}"#), 10);
+        // A server that says more than this app can send still gets at most ten.
+        assert_eq!(info(r#"{"open_joining":true,"max_files":200}"#), 10);
+    }
 
     #[test]
     fn server_proof_binds_the_challenge_to_the_expected_key() {
