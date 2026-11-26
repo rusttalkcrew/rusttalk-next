@@ -161,7 +161,11 @@ impl Crop {
         })?;
         let (image, frames) = decode(&bytes).map_err(|error| {
             tracing::info!(error = %format_args!("{error:#}"), "picture refused");
-            t!("crop.not_picture")
+            if other_picture(&bytes) {
+                t!("crop.wrong_type")
+            } else {
+                t!("crop.not_picture")
+            }
         })?;
         let square = Square::new(image.width(), image.height());
         Ok(Self {
@@ -330,6 +334,33 @@ fn animated_edge(target: &Target) -> u32 {
     }
 }
 
+/// A picture in a format the app doesn't read, such as HEIC, AVIF, BMP or TIFF.
+fn other_picture(bytes: &[u8]) -> bool {
+    // HEIC/HEIF and AVIF are ISO media files: a box size, then `ftyp` and a brand.
+    let heif = bytes.get(4..8) == Some(b"ftyp")
+        && matches!(
+            bytes.get(8..12),
+            Some(
+                b"heic"
+                    | b"heix"
+                    | b"hevc"
+                    | b"hevx"
+                    | b"heim"
+                    | b"heis"
+                    | b"mif1"
+                    | b"msf1"
+                    | b"avif"
+                    | b"avis"
+            )
+        );
+    heif || image::guess_format(bytes).is_ok_and(|format| {
+        !matches!(
+            format,
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP
+        )
+    })
+}
+
 /// Decode a PNG, JPEG, GIF or WebP and scale it down to the working size. An animated
 /// GIF or WebP also gives all its frames (scaled the same way), else none.
 fn decode(bytes: &[u8]) -> Result<(RgbaImage, Vec<Frame>)> {
@@ -457,6 +488,22 @@ fn encode(mut image: RgbaImage, edge: u32, jpeg: bool) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use rusttalk_core::client::decode_profile_image;
+
+    #[test]
+    fn other_picture_formats_are_named_not_called_files() -> Result<()> {
+        // A HEIC photo's first box, as Android 13's Photo Picker can hand one over.
+        let heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic";
+        // The app reads no BMP; its header is enough to tell it's a picture.
+        let bmp = b"BM\x46\0\0\0\0\0\0\0\x36\0\0\0";
+        let mut png = Vec::new();
+        DynamicImage::new_rgb8(2, 2).write_to(&mut Cursor::new(&mut png), ImageFormat::Png)?;
+        assert!(other_picture(heic) && decode(heic).is_err());
+        assert!(other_picture(bmp) && decode(bmp).is_err());
+        assert!(!other_picture(&png) && decode(&png).is_ok());
+        assert!(!other_picture(b"%PDF-1.7 not a picture"));
+        assert!(!other_picture(b"\0\0\0\x18ftypisom"));
+        Ok(())
+    }
 
     #[test]
     fn zoom_and_pan_stay_inside_the_picture() {

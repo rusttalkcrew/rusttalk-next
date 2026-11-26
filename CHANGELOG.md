@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.
+
 ## v0.9.0 - 2026-11-26
 
 - Send up to 10 files in one message, so a whole photo collage fits in one album (on updated servers; others still take 4)

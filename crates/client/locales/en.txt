@@ -1232,6 +1232,7 @@ gallery.position = {at} / {total}
 # crates/client/src/crop.rs
 crop.open_failed = Couldn't open that file.
 crop.not_picture = That file isn't a picture. Pick a PNG, JPG, GIF or WebP.
+crop.wrong_type = This kind of picture can't be used here. Pick a PNG, JPG, GIF or WebP.
 crop.avatar = Crop your picture
 crop.icon = Crop the server icon
 crop.emoji = Crop the emoji

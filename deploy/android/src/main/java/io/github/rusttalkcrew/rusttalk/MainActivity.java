@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.ImageDecoder;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -394,8 +396,10 @@ public class MainActivity extends GameActivity {
             intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                     .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
             if (kind == 1) {
-                intent.setType("image/*").putExtra(Intent.EXTRA_MIME_TYPES,
-                        new String[]{"image/png", "image/jpeg", "image/gif", "image/webp"});
+                // HEIC/HEIF become JPEG in copyPicked, where ImageDecoder reads them.
+                intent.setType("image/*").putExtra(Intent.EXTRA_MIME_TYPES, Build.VERSION.SDK_INT >= 28
+                        ? new String[]{"image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif"}
+                        : new String[]{"image/png", "image/jpeg", "image/gif", "image/webp"});
             } else if (kind == 2) {
                 // Providers name .zip files differently.
                 intent.setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
@@ -430,12 +434,54 @@ public class MainActivity extends GameActivity {
         }
         if (name != null) name = name.replace('/', '_').replace('\\', '_').replace('\0', '_');
         if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) name = "file";
+        if (Build.VERSION.SDK_INT >= 28 && heif(resolver.getType(uri), name)) {
+            String jpeg = name.replaceFirst("(?i)\\.(heic|heif)$", "") + ".jpg";
+            try {
+                toJpeg(uri, new File(folder, jpeg));
+                return jpeg;
+            } catch (IOException | RuntimeException | OutOfMemoryError error) {
+                // The app then says it can't use this kind of picture.
+                Log.w("RustTalk", "Converting a HEIC picture failed", error);
+                new File(folder, jpeg).delete();
+            }
+        }
         try (InputStream in = resolver.openInputStream(uri);
              OutputStream out = new FileOutputStream(new File(folder, name))) {
             if (in == null) throw new IOException("The picker gave no stream");
             copy(in, out);
         }
         return name;
+    }
+
+    private static boolean heif(String type, String name) {
+        if (type != null && type.startsWith("image/hei")) return true;
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        return lower.endsWith(".heic") || lower.endsWith(".heif");
+    }
+
+    /** Pixels a converted picture may have (96 MB decoded); larger ones are halved until they fit. */
+    private static final long MAX_PIXELS = 24_000_000L;
+
+    /**
+     * The app reads only PNG, JPEG, GIF and WebP, so a HEIC/HEIF photo is saved as
+     * JPEG, like iOS hands it over. ImageDecoder applies its EXIF orientation.
+     */
+    private void toJpeg(Uri uri, File out) throws IOException {
+        ImageDecoder.Source source = ImageDecoder.createSource(getContentResolver(), uri);
+        Bitmap bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, src) -> {
+            decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            long pixels = (long) info.getSize().getWidth() * info.getSize().getHeight();
+            int sample = 1;
+            while (pixels / ((long) sample * sample) > MAX_PIXELS) sample *= 2;
+            decoder.setTargetSampleSize(sample);
+        });
+        try (OutputStream stream = new FileOutputStream(out)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)) {
+                throw new IOException("JPEG encoding failed");
+            }
+        } finally {
+            bitmap.recycle();
+        }
     }
 
     // A tap on the call notification (CallService) brings this activity back.
