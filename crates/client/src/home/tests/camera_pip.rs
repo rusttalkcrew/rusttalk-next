@@ -471,3 +471,31 @@ fn a_sideways_phone_keeps_your_camera_in_full_screen() {
     let rect = h.get_by_label(t!("call.your_camera")).rect();
     assert!(rect.top() >= ui::TOUCH_TARGET && rect.bottom() <= sideways.y - ui::TOUCH_TARGET);
 }
+
+/// Turning the phone sideways while in full screen keeps the self view (#656).
+#[test]
+fn turning_the_phone_keeps_your_camera_in_full_screen() {
+    let data = tempfile::tempdir().unwrap();
+    let mut h = sharing(true, Vec2::new(390.0, 844.0), data.path());
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(4.0, 4.0),
+            force: None,
+        });
+        h.step();
+    }
+    camera_on(&mut h);
+    home_mut(&mut h)
+        .voice
+        .stage
+        .set_presenting_and_full_screen("remote");
+    h.run_steps(20);
+    assert!(self_view(&h), "upright");
+    h.set_size(Vec2::new(844.0, 390.0));
+    h.run_steps(20);
+    capture(&mut h, Vec2::new(844.0, 390.0), true, "self-view-turned");
+    assert!(self_view(&h), "sideways");
+}

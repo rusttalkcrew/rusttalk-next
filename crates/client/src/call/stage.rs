@@ -1178,8 +1178,11 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
     };
     let shown = ctx.data(|data| data.get_temp::<u64>(UiId::unique("self camera shown")));
     let screen = ctx.content_rect();
-    // A phone turned sideways, as for a full-screen stream, is wider than a phone.
-    let sideways = ctx.input(|input| input.has_touch_screen()) && screen.height() < ui::PHONE_WIDTH;
+    // A phone turned sideways, as for a full-screen stream, is wider than a phone. Phones
+    // count as touch screens from the start, before egui has seen a touch.
+    let touch = cfg!(any(target_os = "android", target_os = "ios"))
+        || ctx.input(|input| input.has_touch_screen());
+    let sideways = touch && screen.height() < ui::PHONE_WIDTH;
     let phone = ui::is_phone(ctx) || sideways;
     if !phone || voice.call.is_none() || !voice.camera.on || shown == Some(pass) {
         return;
