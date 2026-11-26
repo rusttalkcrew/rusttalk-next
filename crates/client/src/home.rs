@@ -6761,7 +6761,9 @@ fn message(
     if let Some(Some(chosen)) = ui::context_menu(&anchor, |m| menu(m, None)) {
         pick = Some(chosen);
     }
-    let hovered = ui.rect_contains_pointer(rect);
+    // The toolbar is a mouse feature. On a touch screen a tap does nothing here and a
+    // long press opens the menu above; egui keeps the finger as a hover after a tap.
+    let hovered = !ui::TOUCH && !ui.input(|i| i.any_touches()) && ui.rect_contains_pointer(rect);
     if pinged {
         ui::mention_highlight(ui, background, rect.expand(2.0), hovered);
     } else if hovered {
@@ -6784,13 +6786,9 @@ fn message(
             ui.ctx().request_repaint();
         }
     }
-    let (tapped, _) = ui::touch_tools(&row.response);
-    if (tapped && ui::menu_open(&row.response))
-        || (!tapped && (!hovered || ui.input(|i| i.any_touches())))
-    {
+    if !hovered {
         return pick;
     }
-    // Give touch controls their own space below the text; hover controls float above it.
     let buttons = [can_react, can_reply, can_edit, can_delete]
         .into_iter()
         .filter(|on| *on)
@@ -6798,20 +6796,12 @@ fn message(
     if buttons == 0.0 {
         return pick;
     }
-    let button = if tapped {
-        Vec2::splat(ui::TOUCH_TARGET)
-    } else {
-        TOOLBAR_BUTTON
-    };
+    let button = TOOLBAR_BUTTON;
     let size = Vec2::new(
         buttons * button.x + (buttons - 1.0) * 2.0 + 8.0,
         button.y + 8.0,
     );
-    let top = if tapped {
-        ui.allocate_space(size).1.top()
-    } else {
-        rect.top() - 14.0
-    };
+    let top = rect.top() - 14.0;
     let bar = Rect::from_min_size(egui::pos2(rect.right() - size.x - 8.0, top), size);
     let c = ui::colors(ui);
     ui.painter()

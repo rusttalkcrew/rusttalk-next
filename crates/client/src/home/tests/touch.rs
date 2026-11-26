@@ -81,15 +81,31 @@ fn touching_message_text_distinguishes_scroll_tap_and_hold() {
         finger(&mut h, TouchPhase::End, moved);
         h.step();
         assert!(h.query_by_label("Reply").is_none());
+        assert!(
+            h.query_by_label("Copy text").is_none(),
+            "a drag opens no menu"
+        );
         let after_scroll = h.get_by_label("See you tomorrow").rect().center();
         assert!(after_scroll.y > pos.y, "{pos:?} to {after_scroll:?}");
         let pos = after_scroll;
 
+        // A tap shows neither the hover toolbar nor the menu.
         finger(&mut h, TouchPhase::Start, pos);
         finger(&mut h, TouchPhase::End, pos);
-        h.step();
-        assert!(h.query_by_label("Reply").is_some());
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Reply").is_none(),
+            "no toolbar after a tap"
+        );
         assert!(h.query_by_label("Copy text").is_none());
+
+        // A hold opens the message menu, whose items work by touch.
+        finger(&mut h, TouchPhase::Start, pos);
+        h.run_steps(8);
+        finger(&mut h, TouchPhase::End, pos);
+        h.step();
+        h.get_by_label("Copy text");
+        h.get_by_label("Edit");
         let reply = h.get_by_label("Reply").rect().center();
         finger(&mut h, TouchPhase::Start, reply);
         finger(&mut h, TouchPhase::End, reply);
@@ -98,14 +114,6 @@ fn touching_message_text_distinguishes_scroll_tap_and_hold() {
             h.state().as_ref().unwrap().servers[0].chats[&PROJECTS].reply_to,
             Some((ME, [35; 32]))
         );
-        let pos = h.get_by_label("See you tomorrow").rect().center();
-
-        finger(&mut h, TouchPhase::Start, pos);
-        h.run_steps(8);
-        finger(&mut h, TouchPhase::End, pos);
-        h.step();
-        h.get_by_label("Copy text");
-        h.get_by_label("Edit");
     }
 }
 

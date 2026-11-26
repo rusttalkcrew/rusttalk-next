@@ -324,3 +324,71 @@ fn holding_message_text_on_a_phone_opens_the_message_menu() {
     h.step();
     assert!(shows(&h, t!("home.copy_message_id")));
 }
+
+/// On a phone a tap shows no hover toolbar, a hold opens the menu (also over a
+/// link, without following it) and a mouse hover on a desktop still shows the toolbar.
+#[test]
+fn touch_holds_open_the_menu_and_only_a_mouse_shows_the_toolbar() {
+    use super::touch::finger;
+    use eframe::egui::TouchPhase;
+    let url = "https://example.com/notes";
+    for dark in [true, false] {
+        let theme = if dark { "dark" } else { "light" };
+        let (mut h, _, _, _sent) = chat(dark, Vec2::new(390.0, 844.0));
+        let messages = &mut h.state_mut().as_mut().unwrap().servers[0]
+            .chats
+            .get_mut(&PROJECTS)
+            .unwrap()
+            .messages;
+        messages.push(msg(4, ANN, "Notes at https://example.com/notes", vec![]));
+        h.run_steps(4);
+        let opened = |h: &Harness<'_, Option<Home>>| {
+            (h.output().platform_output.commands.iter()).any(
+                |command| matches!(command, egui::OutputCommand::OpenUrl(open) if open.url == url),
+            )
+        };
+
+        let pos = h.get_by_label("See you tomorrow").rect().center();
+        finger(&mut h, TouchPhase::Start, pos);
+        finger(&mut h, TouchPhase::End, pos);
+        h.run_steps(2);
+        assert!(
+            !shows(&h, t!("home.add_reaction")),
+            "no toolbar after a tap"
+        );
+        assert!(
+            !shows(&h, t!("home.copy_message_id")),
+            "no menu after a tap"
+        );
+
+        finger(&mut h, TouchPhase::Start, pos);
+        h.run_steps(8);
+        finger(&mut h, TouchPhase::End, pos);
+        h.run_steps(2);
+        assert!(shows(&h, t!("home.copy_message_id")));
+        assert!(shows(&h, t!("common.delete")));
+        screenshot(&mut h, &format!("long-press-menu-{theme}-390x844"));
+        close_menu(&mut h);
+        assert!(!shows(&h, t!("home.copy_message_id")));
+
+        let link = h.get_by_label(url).rect().center();
+        finger(&mut h, TouchPhase::Start, link);
+        h.run_steps(8);
+        finger(&mut h, TouchPhase::End, link);
+        h.step();
+        assert!(!opened(&h), "a hold doesn't follow the link");
+        h.run_steps(2);
+        assert!(shows(&h, t!("home.copy_message_id")), "menu over a link");
+    }
+
+    let (mut h, _, _, _sent) = chat(true, Vec2::new(1100.0, 700.0));
+    assert!(!shows(&h, t!("home.add_reaction")));
+    let pos = h.get_by_label("Sounds good").rect().center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.run_steps(2);
+    assert!(
+        shows(&h, t!("home.add_reaction")),
+        "hover toolbar on a desktop"
+    );
+    assert!(!shows(&h, t!("home.copy_message_id")));
+}
