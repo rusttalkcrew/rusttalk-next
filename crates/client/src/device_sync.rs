@@ -33,7 +33,7 @@ use crate::{
 /// Voice and video preferences, dismissed official servers, the appearance and language,
 /// and the profile name and bio, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 19] = [
+const SYNCED: [&str; 20] = [
     "push_to_talk",
     "key",
     "threshold",
@@ -49,6 +49,7 @@ const SYNCED: [&str; 19] = [
     "light_theme",
     "accent",
     "language",
+    "clock",
     "friends_only",
     "display_name",
     "bio",
@@ -769,6 +770,7 @@ mod tests {
             "light_theme",
             "accent",
             "language",
+            "clock",
         ] {
             assert!(other.contains_key(key), "{key} is synced");
         }
@@ -776,8 +778,10 @@ mod tests {
         other.insert("light_theme".into(), json!("paper"));
         other.insert("accent".into(), json!("teal"));
         other.insert("language".into(), json!("ja"));
+        other.insert("clock".into(), json!("12h"));
         let adopted = adopt(&local, &other);
         assert_eq!(adopted.language, "ja");
+        assert_eq!(adopted.clock, "12h");
         let look = adopted.appearance();
         assert_eq!(look.mode, crate::ui::Mode::Light);
         assert_eq!(look.light.id, "paper");

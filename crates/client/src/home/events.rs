@@ -1,7 +1,7 @@
 //! The Events page: a month calendar with the events of a day beside it, or below it when
 //! narrow, and the form to suggest or add one.
 
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveTime, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveTime, TimeZone, Timelike};
 use eframe::egui::{
     self, Align, Align2, CursorIcon, FontId, Label, Layout, Rect, Response, RichText, ScrollArea,
     Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, accesskit::Role, text::LayoutJob,
@@ -29,7 +29,7 @@ const SMALL_DAY_HEIGHT: f32 = 44.0;
 const PICKER_DAY_HEIGHT: f32 = 30.0;
 const DAY_GAP: f32 = 4.0;
 const CHIP_HEIGHT: f32 = 18.0;
-const TIME_WIDTH: f32 = 72.0;
+const TIME_WIDTH: f32 = 96.0;
 /// A new event starts at this hour and lasts this long.
 const START_HOUR: u32 = 20;
 const LASTS: i64 = 2 * 60 * 60;
@@ -87,7 +87,7 @@ impl When {
         let at = local(at);
         Self {
             date: at.date_naive(),
-            time: at.format("%H:%M").to_string(),
+            time: crate::i18n::time(at, "time.clock"),
         }
     }
 
@@ -186,9 +186,27 @@ impl Form {
     }
 }
 
-/// `20`, `20:15` or `2015`.
+/// 20:00, the example in empty time fields.
+pub(super) fn evening() -> NaiveTime {
+    NaiveTime::from_hms_opt(20, 0, 0).unwrap_or_default()
+}
+
+/// `20`, `20:15` or `2015`, or with AM or PM: `8 PM`, `8:15pm`, `午後8:15`.
 pub(super) fn parse_time(text: &str) -> Option<NaiveTime> {
-    let text = text.trim();
+    let (text, pm) = crate::i18n::strip_meridiem(text.trim());
+    let time = parse_24h(text)?;
+    let Some(pm) = pm else {
+        return Some(time);
+    };
+    // 12 AM is midnight and 12 PM noon; 0 or 13 with AM or PM is a typo.
+    let hour = time.hour();
+    if !(1..=12).contains(&hour) {
+        return None;
+    }
+    time.with_hour(hour % 12 + if pm { 12 } else { 0 })
+}
+
+fn parse_24h(text: &str) -> Option<NaiveTime> {
     let (hours, minutes) = match text.split_once(':') {
         Some((hours, minutes)) if minutes.len() == 2 => (hours, minutes),
         Some(_) => return None,
@@ -602,7 +620,7 @@ fn one_line(text: &str) -> String {
 
 fn when_text(details: &Details) -> String {
     let (start, end) = (local(details.start), local(details.end));
-    let clock = |at| crate::i18n::time(at, t!("time.clock"));
+    let clock = |at| crate::i18n::time(at, "time.clock");
     let (first, last) = (start.date_naive(), end.date_naive());
     if first == last {
         format!("{}, {} – {}", date_text(first), clock(start), clock(end))
@@ -897,7 +915,7 @@ fn people_dialog(
                 let remind = match next.filter(|next| *next > now) {
                     Some(next) => remind.on_disabled_hover_text(t!(
                         "events.remind_again_at",
-                        time = crate::i18n::time(local(next), t!("time.clock"))
+                        time = crate::i18n::time(local(next), "time.clock")
                     )),
                     None => remind,
                 };
@@ -1109,8 +1127,8 @@ fn when_row(ui: &mut Ui, form: &mut Form, side: Side, now: i64) {
         }
         let time = ui.add(
             ui::field(&mut when.time)
-                .char_limit(5)
-                .hint_text("20:00")
+                .char_limit(10)
+                .hint_text(crate::i18n::clock_time(evening()))
                 .desired_width(TIME_WIDTH),
         );
         time.widget_info(|| WidgetInfo::labeled(Role::TextInput, true, time_label));
@@ -1167,7 +1185,14 @@ mod tests {
         assert_eq!(parse_time(" 20:15 "), time(20, 15));
         assert_eq!(parse_time("2015"), time(20, 15));
         assert_eq!(parse_time("915"), time(9, 15));
-        for bad in ["", "24:00", "20:60", "20:5", "+9:15", "12345", "２０"] {
+        assert_eq!(parse_time("8 PM"), time(20, 0));
+        assert_eq!(parse_time("8:15pm"), time(20, 15));
+        assert_eq!(parse_time("12:05 AM"), time(0, 5));
+        assert_eq!(parse_time("12 p.m."), time(12, 0));
+        assert_eq!(parse_time("9:30 am"), time(9, 30));
+        for bad in [
+            "", "24:00", "20:60", "20:5", "+9:15", "12345", "２０", "13 PM", "0 AM", "PM",
+        ] {
             assert_eq!(parse_time(bad), None, "{bad}");
         }
     }
