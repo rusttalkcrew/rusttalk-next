@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On phones, tapping a message no longer shows the desktop toolbar; press and hold a message to open its menu with react, reply, copy and delete.
+
 ## v0.8.1 - 2026-11-26
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.
