@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.9.0 - 2026-11-26
+
 - Send up to 10 files in one message, so a whole photo collage fits in one album (on updated servers; others still take 4)
 - Clicking the line above a reply now jumps to the message it answers and briefly highlights it, loading older messages when needed; the line itself is calmer, with the person's picture and a short preview.
 - On phones, tapping a message no longer shows the desktop toolbar; press and hold a message to open its menu with react, reply, copy and delete.
