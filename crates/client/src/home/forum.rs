@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use eframe::egui::{self, CursorIcon, Id as UiId, ScrollArea, Sense, Ui, UiBuilder};
+use eframe::egui::{self, Align, CursorIcon, Id as UiId, Rect, ScrollArea, Sense, Ui, UiBuilder};
 use rusttalk_core::{client::MAX_TEXT_CHARS, messages::PollPart};
 
 use super::{
@@ -877,11 +877,20 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                     },
                                 )
                             };
+                            let top = ui.cursor().top();
                             let picked = if nested.contains(&msg.id) {
                                 ui.indent(("nested", msg.id), show).inner
                             } else {
                                 show(ui)
                             };
+                            // Just jumped to from a reply: bring it into view.
+                            if chat.flash.is_some_and(|(person, at, since)| {
+                                (person, at) == (msg.person, msg.id) && now - since < 0.3
+                            }) {
+                                let rows = top..=ui.min_rect().bottom();
+                                let rect = Rect::from_x_y_ranges(ui.max_rect().x_range(), rows);
+                                ui.scroll_to_rect(rect, Some(Align::Center));
+                            }
                             if let Some(pick) = picked {
                                 asked = Some(Asked::Pick(id, pick));
                             }
@@ -1035,6 +1044,13 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
             home.emoji_picker.open_for_reaction();
         }
         Some(Asked::Pick(_, Pick::AddReaction(_))) => {}
+        // A post's answers are all shown when it is open: no paging to do.
+        Some(Asked::Pick(_, Pick::JumpToReply(id, author))) => {
+            match chat.quoted(&id, author).map(|found| found.person) {
+                Some(person) => chat.flash = Some((person, id, now)),
+                None => home.toast = Some((t!("home.reply_gone").into(), now + 6.0)),
+            }
+        }
         Some(Asked::Pick(_, Pick::Poll(part))) => {
             outgoing.extend(poll_draft(channel, String::new(), part))
         }

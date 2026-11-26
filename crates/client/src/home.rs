@@ -78,6 +78,12 @@ const RAIL_WIDTH: f32 = 72.0;
 const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
+/// The replied-to person's picture on a reply line.
+const REPLY_AVATAR: f32 = 16.0;
+/// How long a message jumped to from a reply stays highlighted, fading out.
+const REPLY_FLASH_SECS: f64 = 1.5;
+/// Older pages (of `net::PAGE` messages) to look through for a replied-to message.
+const REPLY_SEEK_PAGES: u8 = 20;
 pub(crate) const STICKER_SIZE: f32 = 160.0;
 /// Emoji of other servers one message may carry as files: a file stays free for a
 /// picture or a link preview.
@@ -5197,6 +5203,30 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let mut rows = std::mem::take(&mut chat.rows);
     // The view stays in place as rows are measured or arrive (see `rows`).
     let (heights, keep) = rows.plan(&keys, chat.scroll_offset);
+    // A replied-to message: jump once it is loaded, paging older history (a bounded
+    // number of pages) until it is; deleted or past kept history, say so.
+    if let Some((id, author, pages)) = chat.seek {
+        if let Some(person) = chat.quoted(&id, author).map(|found| found.person) {
+            chat.jump_to = Some((person, id, 4));
+            chat.flash = Some((person, id, now));
+            chat.seek = None;
+        } else if online && chat.loading {
+            ui.ctx().request_repaint();
+        } else if !online || chat.at_start || pages == 0 {
+            *toast = Some((t!("home.reply_gone").into(), now + 6.0));
+            chat.seek = None;
+        } else {
+            load_older(servers, threads, at, chat);
+            chat.seek = Some((id, author, pages - 1));
+            ui.ctx().request_repaint();
+        }
+    }
+    if chat
+        .flash
+        .is_some_and(|(.., since)| now - since > REPLY_FLASH_SECS)
+    {
+        chat.flash = None;
+    }
     // A message picked in the gallery: its top, a little below the view's, again for
     // a few frames as the rows around it are measured.
     if let Some((person, id, frames)) = chat.jump_to.take() {
@@ -5240,12 +5270,15 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let output = area.show_viewport(ui, |ui, viewport| {
         ui.set_width(ui.available_width());
         laid_at = viewport.min.y;
-        // Scrolled there, as by hand, so it no longer follows the newest message.
-        if let Some(to) = scroll_to {
-            let delta = Vec2::new(0.0, viewport.min.y - to);
-            ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
-        }
         let origin = ui.max_rect().top();
+        // Scrolled there, so it no longer follows the newest message. An offset, not a
+        // delta: a delta lands a frame late and asking again meanwhile would add up.
+        if let Some(to) = scroll_to {
+            let top = egui::pos2(ui.max_rect().left(), origin + to);
+            let rect = Rect::from_min_size(top, Vec2::new(1.0, viewport.height()));
+            let none = egui::style::ScrollAnimation::none();
+            ui.scroll_to_rect_animation(rect, Some(Align::TOP), none);
+        }
         let y = |ui: &Ui| ui.cursor().top() - origin;
         if chat.at_start {
             ui.add_space(ui::SPACE_M);
@@ -5418,6 +5451,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 chat.clear_draft();
             }
             ui.memory_mut(|memory| memory.request_focus(composer_id(key)));
+        }
+        Some(Pick::JumpToReply(id, author)) => {
+            chat.seek = Some((id, author, REPLY_SEEK_PAGES));
+            ui.ctx().request_repaint();
         }
         Some(Pick::Edit(id, text)) => {
             chat.editing = Some(id);
@@ -5736,6 +5773,8 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
 enum Pick {
     /// Person and ID.
     Reply(Id, Id),
+    /// Scroll to the message a reply answers: its ID and author hint.
+    JumpToReply(Id, Option<Id>),
     Edit(Id, String),
     Delete(Id),
     /// Join with, or open the server of, an invite link shown as a card.
@@ -6248,6 +6287,88 @@ fn fits(ui: &Ui, channel: &str) -> bool {
     width + 12.0 <= ui.available_width()
 }
 
+/// The line above a reply, as in Discord: a curved line out of the avatar column to
+/// the replied-to person's picture, name and a one-line preview. `true` when
+/// clicked, to jump to that message.
+fn reply_line(
+    ui: &mut Ui,
+    chat: &Chat,
+    msg: &Msg,
+    reply: Id,
+    dir: &Directory,
+    channel: Id,
+) -> bool {
+    let quoted = chat.quoted(&reply, msg.quoted_author);
+    let person = quoted.map(|quoted| quoted.person).or(msg.quoted_author);
+    let preview: String = match quoted {
+        Some(quoted) if quoted.sticker.is_some() => t!("home.a_sticker").into(),
+        Some(quoted) => {
+            let text = mentions::Message::cached(ui, quoted, dir, channel).plain(dir);
+            let snippet: String = (text.chars().take(120))
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
+            if snippet.is_empty() {
+                t!("home.a_file").into()
+            } else {
+                snippet
+            }
+        }
+        None => t!("home.earlier_message").into(),
+    };
+    let size = Vec2::new(ui.available_width(), REPLY_AVATAR + 2.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, t!("home.jump_to_reply")));
+    let hovered = response.hovered();
+    let c = ui::colors(ui);
+    // From above the avatar up, then round to the right, ending before the picture.
+    let spine = rect.left() + MESSAGE_AVATAR / 2.0;
+    let start = rect.left() + MESSAGE_AVATAR + ui.spacing().item_spacing.x + ui::SPACE_XS;
+    let (mid, radius) = (rect.center().y, 6.0);
+    let mut points = vec![
+        egui::pos2(spine, rect.bottom()),
+        egui::pos2(spine, mid + radius),
+    ];
+    points.extend((1..=8).map(|step| {
+        let angle = std::f32::consts::PI * (1.0 + step as f32 / 16.0);
+        egui::pos2(spine, mid) + radius * (Vec2::new(1.0, 1.0) + Vec2::angled(angle))
+    }));
+    points.push(egui::pos2(start - ui::SPACE_XS, mid));
+    let stroke = Stroke::new(2.0, c.border.lerp_to_gamma(c.muted, 0.3));
+    ui.painter().add(Shape::line(points, stroke));
+    let content = Rect::from_min_max(egui::pos2(start, rect.top()), rect.max);
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(content)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = ui::SPACE_XS;
+    let (name, text) = if hovered {
+        (c.strong, c.text)
+    } else {
+        (c.text, c.muted)
+    };
+    if let Some(person) = person {
+        let shown = member_name(dir, &person);
+        face(&mut row, dir, &person, &shown, REPLY_AVATAR, false);
+        let label = ui::bold(shown).size(ui::TEXT_CAPTION).color(name);
+        row.add(quiet(label));
+    }
+    row.add(quiet(
+        emoji::text(preview).size(ui::TEXT_CAPTION).color(text),
+    ));
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// One line of text cut short with "…", without a tooltip repeating it.
+fn quiet(text: RichText) -> Label {
+    Label::new(text)
+        .selectable(false)
+        .truncate()
+        .show_tooltip_when_elided(false)
+}
+
 fn message_time(ui: &mut Ui, msg: &Msg) {
     ui.label(ui::caption(time(msg.at)));
     if msg.backfilled {
@@ -6405,37 +6526,10 @@ fn message(
     let row = ui.scope_builder(builder, |ui| {
         ui.spacing_mut().item_spacing.y = ui::SPACE_XS;
         // Above the avatar, as in Discord, so the avatar lines up with the name.
-        if let Some(reply) = msg.reply_to {
-            ui::text_row(ui, false, |ui| {
-                ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x + ui::SPACE_XS);
-                let quoted = chat.quoted(&reply, msg.quoted_author);
-                let line = match quoted {
-                    Some(quoted) if quoted.sticker.is_some() => {
-                        format!(
-                            "↪ {}",
-                            t!("home.quote_sticker", name = names(&quoted.person))
-                        )
-                    }
-                    Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
-                        let text = mentions::Message::cached(ui, quoted, dir, channel).plain(dir);
-                        let person = quoted.person;
-                        let snippet: String = text.chars().take(80).collect();
-                        let snippet = if snippet.is_empty() {
-                            t!("home.a_file").into()
-                        } else {
-                            snippet
-                        };
-                        format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
-                    }
-                    _ => match msg.quoted_author {
-                        Some(person) => {
-                            format!("↪ {}: {}", names(&person), t!("home.earlier_message"))
-                        }
-                        None => format!("↪ {}", t!("home.earlier_message")),
-                    },
-                };
-                ui.add(Label::new(emoji::text(line).size(ui::TEXT_CAPTION).weak()).truncate());
-            });
+        if let Some(reply) = msg.reply_to
+            && reply_line(ui, chat, msg, reply, dir, channel)
+        {
+            invite = Some(Pick::JumpToReply(reply, msg.quoted_author));
         }
         ui.horizontal_top(|ui| {
             if start {
@@ -6652,6 +6746,20 @@ fn message(
             background,
             Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
         );
+    }
+    // Jumped to from a reply: an accent fill that fades out.
+    if let Some((.., since)) = chat.flash.filter(|f| f.0 == msg.person && f.1 == msg.id) {
+        let left = 1.0 - (ui.input(|i| i.time) - since) / REPLY_FLASH_SECS;
+        if left > 0.0 {
+            let c = ui::colors(ui);
+            let surface = if hovered { c.hover_soft } else { c.main };
+            let fill = surface.lerp_to_gamma(ui::accent(ui).base, 0.3 * left.min(1.0) as f32);
+            ui.painter().set(
+                background,
+                Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, fill),
+            );
+            ui.ctx().request_repaint();
+        }
     }
     let (tapped, _) = ui::touch_tools(&row.response);
     if (tapped && ui::menu_open(&row.response))
@@ -7783,6 +7891,7 @@ mod tests {
     mod presence;
     mod rail;
     mod reactions;
+    mod reply_jump;
     mod server_emoji;
     mod settings_close;
     mod streams;

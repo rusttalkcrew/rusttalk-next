@@ -1009,6 +1009,11 @@ pub struct Chat {
     /// A message to bring into view (from the gallery), by author and ID, and the
     /// frames left to settle on it while rows near it are measured.
     pub jump_to: Option<(Id, Id, u8)>,
+    /// A replied-to message being looked for in older pages: its ID, the author
+    /// hint and the pages left to ask for before giving up.
+    pub seek: Option<(Id, Option<Id>, u8)>,
+    /// A message jumped to, by author and ID, and when, to flash it briefly.
+    pub flash: Option<(Id, Id, f64)>,
     /// Row heights and the row in view, so only rows near the view are laid out.
     pub rows: crate::home::rows::Rows,
     /// Where each ID is in `messages`, for reply quotes; rebuilt after changes.

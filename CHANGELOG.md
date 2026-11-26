@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Clicking the line above a reply now jumps to the message it answers and briefly highlights it, loading older messages when needed; the line itself is calmer, with the person's picture and a short preview.
+
 ## v0.8.1 - 2026-11-26
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.

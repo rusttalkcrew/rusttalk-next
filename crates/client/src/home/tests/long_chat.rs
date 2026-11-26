@@ -198,7 +198,7 @@ fn an_older_page_keeps_the_view_in_place_and_the_top_is_reachable() {
         h.run_steps(6);
         let first = rect_of(&h, "L0001.").expect("the first message");
         assert!(first.top() > 0.0 && first.bottom() < size.y, "{first:?}");
-        assert!(h.query_by_label_contains("Me: Line L0005.").is_some());
+        assert_eq!(h.query_all_by_label_contains("Line L0005.").count(), 2);
         assert!(chat(&h).rows.drawn <= 80);
     }
 }
