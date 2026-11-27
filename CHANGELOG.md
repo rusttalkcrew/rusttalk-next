@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.10.0 - 2026-11-27
+
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.
 - On a computer, opening a channel or DM puts the cursor in the message box so you can type straight away.
 - Settings → Appearance has a Time format choice: Automatic (follows the app language), 12-hour (2:58 PM) or 24-hour (14:58). It applies to every time in the app and follows you to your other devices. Event and focus mode time fields also accept times like 8 PM.
