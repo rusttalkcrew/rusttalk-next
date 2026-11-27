@@ -1200,6 +1200,30 @@ fn saw_self(ctx: &egui::Context) {
     ctx.data_mut(|data| data.insert_temp(UiId::unique("self camera shown"), pass));
 }
 
+/// Something the phone self view must not cover this pass, like the sidebar's voice
+/// panel and user bar.
+pub fn keep_clear(ctx: &egui::Context, rect: Rect) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| data.insert_temp(UiId::unique("self view keep clear"), (pass, rect)));
+}
+
+/// `area` without the side of it that `clear` takes: beside it when `clear` runs from the
+/// top to the bottom of `area` or more, else above it.
+fn leave_clear(area: Rect, clear: Rect) -> Rect {
+    if !area.intersects(clear) {
+        return area;
+    }
+    let mut free = area;
+    let column = clear.top() <= area.top() && clear.bottom() >= area.bottom();
+    if column && clear.center().x < area.center().x {
+        // A column on the left, like the sidebar of a phone held sideways.
+        free.min.x = clear.right();
+    } else {
+        free.max.y = free.max.y.min(clear.top());
+    }
+    free
+}
+
 /// On phones, our camera in a corner while our own tile is off screen: a full-screen
 /// stream, or the chat instead of the call. Dragged, it snaps to a corner; it shrinks
 /// to a pill. Draw it after the call view, so that this pass knows what it showed.
@@ -1250,10 +1274,23 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
     } else {
         (SELF_VIEW_TOP, SELF_VIEW_BOTTOM)
     };
-    let area = Rect::from_min_max(
+    let mut area = Rect::from_min_max(
         pos2(screen.left(), screen.top() + top),
         pos2(screen.right(), screen.bottom() - bottom),
     );
+    let clear = ctx.data(|data| data.get_temp::<(u64, Rect)>(UiId::unique("self view keep clear")));
+    if let Some((drawn, clear)) = clear
+        && drawn == pass
+        && voice.stage.full.is_none()
+    {
+        // Sideways the whole sidebar column stays clear, not just its bottom.
+        let clear = if sideways {
+            Rect::from_x_y_ranges(clear.x_range(), screen.y_range())
+        } else {
+            clear
+        };
+        area = leave_clear(area, clear);
+    }
     // Top right at first: a sharer's camera sits bottom right on their stream.
     let first = Pip {
         corner: pip::Corner::TopRight,
@@ -2479,6 +2516,23 @@ mod tests {
                     .all(|r| (r.aspect_ratio() - ASPECT).abs() < 0.01)
             );
         }
+    }
+
+    #[test]
+    fn the_self_view_leaves_the_voice_panel_clear() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(914.0, 380.0));
+        // Sideways: the sidebar column on the left stays clear.
+        // Inset by the panel's margin, as drawn.
+        let column = Rect::from_min_max(pos2(8.0, 0.0), pos2(320.0, 380.0));
+        assert_eq!(leave_clear(screen, column).left(), 320.0);
+        // Upright: the voice panel along the bottom of the drawer stays clear.
+        let upright = Rect::from_min_size(pos2(0.0, 0.0), vec2(390.0, 844.0));
+        let panel = Rect::from_min_max(pos2(0.0, 600.0), pos2(330.0, 844.0));
+        let free = leave_clear(upright, panel);
+        assert_eq!((free.bottom(), free.right()), (600.0, 390.0));
+        // Not in the way: unchanged.
+        let below = Rect::from_min_max(pos2(0.0, 900.0), pos2(330.0, 1000.0));
+        assert_eq!(leave_clear(upright, below), upright);
     }
 
     #[test]

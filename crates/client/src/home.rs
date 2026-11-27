@@ -2609,9 +2609,13 @@ fn sidebar_column(
         .exact_size(RAIL_WIDTH + channels_width)
         .frame(Frame::new())
         .show(ui, |ui| {
-            Panel::bottom("you")
+            let you = Panel::bottom("you")
                 .frame(panel_frame(colors.side))
-                .show(ui, |ui| bottom_panel(ui, home, updates, short));
+                .show(ui, |ui| bottom_panel(ui, home, updates, short))
+                .response
+                .rect;
+            // The phone self view keeps clear of the voice panel and the user bar.
+            call::keep_clear(ui.ctx(), you);
             Panel::left("servers")
                 .resizable(false)
                 // The rail's own colour sets it apart from the channels.
