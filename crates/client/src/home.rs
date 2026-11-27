@@ -2169,6 +2169,7 @@ pub fn show(
     ui::apply(ui.ctx(), settings.appearance());
     emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
     crate::i18n::set(&settings.language);
+    crate::i18n::set_clock(&settings.clock);
     if welcome::show(ui, home) {
         return None;
     }
@@ -7934,6 +7935,7 @@ mod tests {
     mod avatars;
     mod call_controls;
     mod camera_pip;
+    mod clock_format;
     mod diagram;
     mod dialogs;
     mod emoji;

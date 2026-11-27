@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Settings → Appearance has a Time format choice: Automatic (follows the app language), 12-hour (2:58 PM) or 24-hour (14:58). It applies to every time in the app and follows you to your other devices. Event and focus mode time fields also accept times like 8 PM.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

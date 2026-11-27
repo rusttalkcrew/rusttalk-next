@@ -181,6 +181,7 @@ fn options() -> Vec<(Tab, &'static str)> {
         (Tab::Devices, t!("settings.this_device")),
         (Tab::Devices, t!("settings.other_devices")),
         (Tab::Appearance, t!("settings.language")),
+        (Tab::Appearance, t!("settings.clock")),
         (Tab::Appearance, t!("settings.mode")),
         (Tab::Appearance, t!("settings.accent")),
         (Tab::Appearance, t!("settings.motion")),
