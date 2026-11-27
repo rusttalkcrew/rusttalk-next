@@ -951,7 +951,7 @@ mod tests {
             (6, true),
             (7, true),
         ] {
-            let mut tx = app.db.begin().await?;
+            let mut tx = crate::store::write(&app.db).await?;
             let result =
                 crate::auth::redeem(&mut tx, &person(100 + byte), &code(byte), now()?).await;
             match result {
@@ -968,7 +968,7 @@ mod tests {
             .bind(person(5))
             .execute(&app.db)
             .await?;
-        let mut tx = app.db.begin().await?;
+        let mut tx = crate::store::write(&app.db).await?;
         crate::auth::redeem(&mut tx, &person(105), &code(5), now()?).await?;
         Ok(())
     }
@@ -980,7 +980,7 @@ mod tests {
         let code = crate::auth::owner_invite(&db)
             .await?
             .expect("owner pending");
-        let mut tx = db.begin().await?;
+        let mut tx = crate::store::write(&db).await?;
         crate::auth::redeem(&mut tx, &person(1), &code, now()?).await?;
         tx.commit().await?;
         assert!(!crate::auth::owner_pending(&db).await?);
