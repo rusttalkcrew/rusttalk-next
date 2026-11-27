@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.11.0 - 2026-11-27
+
 - Zoom pictures in the viewer with the scroll wheel.
 - Adding many files to a channel's shared files at once no longer fails when the server asks you to slow down: the app waits a moment and carries on.
 - Server owners can remove illegal content with "Remove content" on a message or by pasting its ID in Server settings → Takedowns: the message, its edits and its files are deleted from the server, the account can be banned in the same step, and a record without the content is kept.
