@@ -362,6 +362,7 @@ pub(super) async fn scenario(
     assert_eq!(b.download_file(&listed.file.file, None).await?, MARKER);
     b.delete_message_file(&shared.file.id, &a_person).await?;
     assert!(b.shared_files(&channel.id).await?.is_empty());
+    Box::pin(takedown(project, a, b, &channel.id, &png)).await?;
     // A channel keeps at most 500 shared files; the list returns them all. Filling it
     // at once is no normal use, so the owner relaxes the rate limits meanwhile.
     rate_limits(a, "relaxed").await?;
@@ -396,6 +397,114 @@ pub(super) async fn scenario(
     check_storage(project, &encode(&replacement.file.id))?;
     println!(
         "W13 verified encrypted file SHA-256, PNG thumbnail, shared files kept past expiry, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry, no ID reuse and zero plaintext in SQLite, WAL, blobs and logs"
+    );
+    Ok(())
+}
+
+/// The stored ciphertext of a file, as the server keeps it.
+async fn ciphertext(client: &KeyClient<'_>, id: &[u8; 32]) -> Result<Vec<u8>> {
+    let path = format!("/v1/files/{}", encode(id));
+    let reply = client.request(Method::GET, &path).send().await?;
+    Ok(reply.error_for_status()?.bytes().await?.to_vec())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// W679: only the owner removes a message for a legal reason, with its picture, thumbnail
+/// and a shared file; all of it leaves the server and its disk, and the record keeps the
+/// ciphertext fingerprints and the owner's reason but no content.
+async fn takedown(
+    project: &str,
+    owner: &KeyClient<'_>,
+    poster: &mut KeyClient<'_>,
+    channel: &[u8; 32],
+    png: &[u8],
+) -> Result<()> {
+    let image = poster
+        .upload_file(channel, PNG, "image/png", png, None)
+        .await?;
+    let thumbnail = image.thumbnail.clone().context("missing thumbnail")?;
+    let post = poster
+        .send_message(
+            channel,
+            &MessageBody {
+                attachments: vec![image.clone()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let shared = share(poster, channel).await?;
+    let record = owner.message(channel, &post.id).await?;
+    let envelope = rusttalk_core::auth::decode_bytes(&record.envelope)?;
+    let mut expected = vec![(encode(&post.id), hex(&Sha256::digest(&envelope)))];
+    for id in [image.file.id, thumbnail.id, shared] {
+        let digest = Sha256::digest(ciphertext(owner, &id).await?);
+        expected.push((encode(&id), hex(&digest)));
+    }
+    let reason = "W679 notice about a reported picture";
+    let body = json!({
+        "ids": expected.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        "reason": reason,
+        "notice": "W679-CASE-7",
+    });
+    rejected(
+        paced(poster.request(Method::POST, "/v1/takedowns").json(&body)).await?,
+        StatusCode::FORBIDDEN,
+        "owner_required",
+    )
+    .await?;
+    let reply = paced(owner.request(Method::POST, "/v1/takedowns").json(&body)).await?;
+    assert_eq!(reply.status(), StatusCode::CREATED);
+    let taken: serde_json::Value = reply.json().await?;
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let mut recorded: Vec<(String, String)> = (taken["items"].as_array().context("items")?)
+        .iter()
+        .map(|item| (text(&item["id"]), text(&item["sha256"])))
+        .collect();
+    recorded.sort();
+    expected.sort();
+    assert_eq!(recorded, expected);
+    assert!(taken["reason"] == reason && taken.get("banned").is_none());
+
+    let error = match poster.message(channel, &post.id).await {
+        Ok(_) => anyhow::bail!("a removed message is still there"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        (error.downcast_ref::<reqwest::Error>()).and_then(reqwest::Error::status),
+        Some(StatusCode::NOT_FOUND)
+    );
+    for id in [image.file.id, thumbnail.id, shared] {
+        let id = encode(&id);
+        rejected(
+            (owner.request(Method::GET, &format!("/v1/files/{id}")))
+                .send()
+                .await?,
+            StatusCode::NOT_FOUND,
+            "file_not_found",
+        )
+        .await?;
+        let on_disk = "if [ -e /data/files/\"$1\" ]; then echo present; fi";
+        let state = compose(
+            project,
+            &["exec", "-T", "api", "sh", "-ec", on_disk, "sh", &id],
+        )?;
+        assert!(state.is_empty(), "a removed file is still on disk");
+    }
+    let listed = poster.shared_files(channel).await?;
+    assert!(!listed.iter().any(|file| file.file.file.id == shared));
+    let records: Vec<serde_json::Value> = owner
+        .request(Method::GET, "/v1/takedowns")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(records.first(), Some(&taken));
+    println!(
+        "W679 the owner removed a message, its picture, thumbnail and shared file from the server and disk; the record keeps their ciphertext SHA-256"
     );
     Ok(())
 }

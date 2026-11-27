@@ -122,6 +122,11 @@ pub enum Admin {
     LoadUpdates,
     /// List the server publicly with these details, or stop (`None`).
     SaveListing(Option<PublicListing>),
+    /// Remove messages and files for a legal reason, everywhere the server keeps them,
+    /// and maybe ban who posted them (owner).
+    TakeDown(TakeDown),
+    /// What the owner removed before.
+    LoadTakedowns,
     /// Changes saved together, one after another in this order. The server reloads once
     /// after the last, and one reply says how it went.
     Batch(Vec<Admin>),
@@ -144,6 +149,38 @@ pub struct PublicListing {
     pub index_url: String,
     /// The directory's certificate pin as base64url, or empty to use normal trust.
     pub index_fingerprint: String,
+}
+
+/// A takedown to make: messages and stored files by ID, why, and the notice's reference.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakeDown {
+    pub ids: Vec<Id>,
+    pub reason: String,
+    /// Empty for none.
+    pub notice: String,
+    /// Also ban the one account that posted it all.
+    pub ban: bool,
+}
+
+/// What the owner removed before: the server's record of one takedown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Takedown {
+    pub at: i64,
+    pub actor: Id,
+    pub reason: String,
+    pub notice: Option<String>,
+    pub banned: Option<Id>,
+    pub items: Vec<TakenDown>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakenDown {
+    /// A stored file, otherwise a message.
+    pub file: bool,
+    pub id: Id,
+    pub size: i64,
+    /// SHA-256 of the ciphertext, as hex.
+    pub sha256: Option<String>,
 }
 
 pub struct Ban {
@@ -175,6 +212,8 @@ pub struct AuditEntry {
 
 pub enum AdminUpdate {
     Bans(Vec<Ban>),
+    /// Newest first.
+    Takedowns(Vec<Takedown>),
     /// Newest first; `older` continues the list. `next` asks for the page after it.
     Audit {
         entries: Vec<AuditEntry>,
@@ -233,6 +272,7 @@ pub(super) async fn run(
     }
     let bans_changed = matches!(request, Admin::Ban(..) | Admin::Unban(_));
     let invites_changed = matches!(request, Admin::RevokeInvite(_));
+    let taken_down = matches!(request, Admin::TakeDown(_));
     let Some(result) = change(ctx, url, client, request).await else {
         return;
     };
@@ -243,6 +283,12 @@ pub(super) async fn run(
             if bans_changed {
                 match bans(client).await {
                     Ok(list) => send(AdminUpdate::Bans(list)),
+                    Err(text) => send(AdminUpdate::Failed(text)),
+                }
+            }
+            if taken_down {
+                match takedowns(client).await {
+                    Ok(list) => send(AdminUpdate::Takedowns(list)),
                     Err(text) => send(AdminUpdate::Failed(text)),
                 }
             }
@@ -410,6 +456,24 @@ async fn change(
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
             return None;
+        }
+        Admin::LoadTakedowns => {
+            send(
+                takedowns(client)
+                    .await
+                    .map_or_else(AdminUpdate::Failed, AdminUpdate::Takedowns),
+            );
+            return None;
+        }
+        Admin::TakeDown(takedown) => {
+            let ids: Vec<String> = takedown.ids.iter().map(|id| encode(id)).collect();
+            let mut body = json!({"ids": ids, "reason": takedown.reason, "ban": takedown.ban});
+            if !takedown.notice.trim().is_empty() {
+                body["notice"] = takedown.notice.into();
+            }
+            call(client, Method::POST, "/v1/takedowns", Some(body))
+                .await
+                .map(|()| t!("takedown.done"))
         }
         Admin::Invites => {
             match invites(client).await {
@@ -759,6 +823,39 @@ async fn bans(client: &KeyClient<'_>) -> Result<Vec<Ban>, String> {
             })
         })
         .collect())
+}
+
+async fn takedowns(client: &KeyClient<'_>) -> Result<Vec<Takedown>, String> {
+    let rows = get(client, "/v1/takedowns")
+        .await
+        .map_err(|error| failed(&error))?;
+    Ok(rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(takedown)
+        .collect())
+}
+
+fn takedown(row: &Value) -> Option<Takedown> {
+    let person = |value: &Value| value.as_str().and_then(|id| decode(id).ok());
+    Some(Takedown {
+        at: row["at"].as_i64()?,
+        actor: person(&row["actor"])?,
+        reason: row["reason"].as_str()?.to_owned(),
+        notice: row["notice"].as_str().map(str::to_owned),
+        banned: person(&row["banned"]),
+        items: (row["items"].as_array()?.iter())
+            .filter_map(|item| {
+                Some(TakenDown {
+                    file: item["kind"] == "file",
+                    id: decode(item["id"].as_str()?).ok()?,
+                    size: item["size"].as_i64()?,
+                    sha256: item["sha256"].as_str().map(str::to_owned),
+                })
+            })
+            .collect(),
+    })
 }
 
 async fn invites(client: &KeyClient<'_>) -> Result<Vec<Invite>, String> {
@@ -1189,6 +1286,9 @@ fn problem(code: &str) -> &'static str {
         "emoji_too_large" | "body_too_large" => t!("admin.emoji_too_large"),
         "emoji_not_found" => t!("admin.emoji_not_found"),
         "invalid_role_count" => t!("admin.invalid_role_count"),
+        "takedown_not_found" => t!("takedown.not_found"),
+        "takedown_several_authors" => t!("takedown.several_authors"),
+        "invalid_takedown_reason" => t!("takedown.reason_needed"),
         "space_key_unavailable" | "metadata_epoch_changed" => {
             t!("admin.key_changing")
         }

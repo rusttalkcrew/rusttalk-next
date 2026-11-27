@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server owners can remove illegal content with "Remove content" on a message or by pasting its ID in Server settings → Takedowns: the message, its edits and its files are deleted from the server, the account can be banned in the same step, and a record without the content is kept.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

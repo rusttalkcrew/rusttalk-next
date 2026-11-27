@@ -212,6 +212,11 @@ Keep port 8080 internal to the Compose network. Caddy strips incoming
 Keep the API behind this trusted edge.
 [Caddy proxy headers](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults).
 
+## Illegal content
+
+If you learn that illegal content is on your server, the owner can remove it
+and keep a record: see [Handling illegal content](operators.md).
+
 ## Stored file limits
 
 A member with Manage Server sets these limits in **Server settings → Files**,

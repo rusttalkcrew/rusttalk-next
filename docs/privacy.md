@@ -20,6 +20,8 @@ their expiry) are kept only in memory for at most 60 seconds. For automatic lock
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id`, `banned_at` (Unix seconds), nullable `banned_by` (person ID of the member who placed it, also in the audit log) and `banned_by_rank` (their highest role rank then, so only the owner, they or someone who outranks them can lift it) |
+| `takedowns` | `id` (sequence), `at` (Unix seconds), `actor_person_id` (the owner), `reason` and nullable `notice` (**plain text**: the owner's own words for why, and a notice's reference such as a case number; see [Takedowns](#takedowns)), nullable `banned_person_id` (the account banned in the same step) |
+| `takedown_items` | `takedown_id`, `kind` (message or file), `item_id`, `channel_id`, `author_person_id`, `size` (bytes of ciphertext), nullable `sha256` (SHA-256 of the removed ciphertext; never the plaintext or a key) |
 | `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility), nullable `details` (JSON of what changed: role IDs, permission flags, file-limit numbers, the names of changed server fields and whether the server is listed; never names or other content) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
@@ -282,6 +284,26 @@ complete file to the path chosen by the user.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.
+
+### Takedowns
+
+When the server's owner removes content for a legal reason (Server settings >
+Takedowns, or "Remove content" on a message), the server deletes the messages
+and files they name everywhere it keeps them: the message rows, the file on
+disk, the shared-file list and a page's kept files. Deleted database rows are
+overwritten with zeros (`secure_delete`) and the WAL is checkpointed and
+truncated afterwards, so the ciphertext doesn't stay in free pages or the log.
+The server keeps a record of each takedown: IDs, authors, sizes and a SHA-256
+of each removed ciphertext, when, by whom, and whether the author was banned.
+It never keeps the content or a key, so the record alone can't show what was
+said. The owner's **reason and notice reference are stored in plain text**:
+they are operational notes the owner writes, like a moderator's audit entry,
+not member content, and the owner may need to hand them to the authorities
+without a device. The app asks the owner to describe the content without
+copying it. Records are listed only to the owner and are never deleted by
+the server. Copies outside the server (members' devices, other servers
+holding a DM copy, the operator's own backups) are not touched; see
+[docs/operators.md](operators.md).
 
 ## What the desktop client stores
 

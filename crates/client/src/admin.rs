@@ -16,6 +16,8 @@ mod members;
 
 mod roles;
 
+pub mod takedown;
+
 pub mod timeout;
 
 use chrono::{DateTime, Local};
@@ -32,7 +34,7 @@ use crate::{
         Home, initials,
         person::{self, Person, Pick},
     },
-    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
+    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing, Takedown},
     server::{Channel, Id, Perms, Server},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
@@ -85,6 +87,8 @@ pub enum Tab {
     Stickers,
     /// Stop new people joining.
     Lockdown,
+    /// The owner's takedowns: remove content for a legal reason, and the record of it.
+    Takedowns,
 }
 
 enum MemberAction {
@@ -116,6 +120,9 @@ pub struct Settings {
     rate_limits: Option<rate_limits::Form>,
     new_members: Option<new_members::Form>,
     lockdown: Option<lockdown::Form>,
+    /// Newest first; `None` until loaded (owner).
+    takedowns: Option<Vec<Takedown>>,
+    takedown: takedown::Form,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -155,6 +162,7 @@ impl Settings {
     pub fn apply(&mut self, update: AdminUpdate) {
         match update {
             AdminUpdate::Bans(bans) => (self.bans, self.bans_loaded) = (bans, true),
+            AdminUpdate::Takedowns(list) => self.takedowns = Some(list),
             AdminUpdate::Audit {
                 entries,
                 older,
@@ -221,6 +229,9 @@ impl Settings {
                 self.revoking = None;
                 self.emoji.done();
                 self.import = None;
+                if self.tab == Tab::Takedowns {
+                    self.takedown = takedown::Form::default();
+                }
                 self.message = Some((text.into(), false));
             }
             // Only Roles saves in batches.
@@ -379,6 +390,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::NewMembers {
         server.send(Command::Admin(Admin::LoadNewMembers));
     }
+    if tab == Tab::Takedowns {
+        server.send(Command::Admin(Admin::LoadTakedowns));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -395,6 +409,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         rate_limits: None,
         new_members: None,
         lockdown: None,
+        takedowns: None,
+        takedown: takedown::Form::default(),
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -679,6 +695,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         t!("lockdown.title"),
                         perms.lock_down && server.dir.lockdown.is_some(),
                     ),
+                    page(Tab::Takedowns, "⚖", t!("takedown.title"), perms.owner),
                     page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit),
                 ],
             ),
@@ -770,6 +787,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             None
                         }
                     },
+                    Tab::Takedowns => takedown::page(
+                        ui,
+                        server,
+                        &mut settings.takedown,
+                        settings.takedowns.as_deref(),
+                    ),
                     Tab::Emoji | Tab::Stickers => {
                         let sticker = before == Tab::Stickers;
                         let picker = crate::files::PICKER;
@@ -806,6 +829,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::History => Some(Admin::LoadHistory),
                 Tab::RateLimits => Some(Admin::LoadRateLimits),
                 Tab::NewMembers => Some(Admin::LoadNewMembers),
+                Tab::Takedowns => Some(Admin::LoadTakedowns),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
@@ -1371,6 +1395,10 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "lockdown_message_changed" => t!("audit.lockdown_message_changed", actor = actor),
         "auto_lockdown_changed" => t!("audit.auto_lockdown_changed", actor = actor),
         "lockdown_auto_started" => t!("audit.lockdown_auto_started").into(),
+        "content_taken_down" => match entry.target {
+            Some(_) => t!("audit.content_taken_down", actor = actor, target = target),
+            None => t!("audit.content_taken_down_many", actor = actor),
+        },
         "recent_messages_removed" => {
             t!(
                 "audit.recent_messages_removed",
@@ -1516,6 +1544,11 @@ fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
             vec![format!("{} → {}", spike("before")?, spike("after")?)]
         }
         "lockdown_auto_started" => vec![spike(details)?],
+        "content_taken_down" => vec![t!(
+            "audit.removed_counts",
+            messages = details["messages"].as_u64()?,
+            files = details["files"].as_u64()?
+        )],
         "recent_messages_removed" => vec![t!(
             "audit.removed_counts",
             messages = details["messages"].as_u64()?,

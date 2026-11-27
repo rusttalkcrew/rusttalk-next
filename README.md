@@ -242,6 +242,7 @@ Optional automatic patch updates (off by default, no backup or rollback):
 - [Privacy](docs/privacy.md)
 - [Per-app routing (SOCKS5, WireGuard, Tor)](docs/routing.md)
 - [Operations](docs/operations.md)
+- [Handling illegal content](docs/operators.md)
 - [Development](docs/development.md)
 - [Phones and tablets](docs/mobile.md)
 - [Work order](docs/work-order.md)

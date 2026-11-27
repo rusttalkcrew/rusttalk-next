@@ -346,7 +346,11 @@ pub async fn revoke_invite(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remove_member(app: &App, db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<i64>> {
+pub(crate) async fn remove_member(
+    app: &App,
+    db: &mut SqliteConnection,
+    person: &[u8],
+) -> ApiResult<Vec<i64>> {
     let exists: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM members WHERE person_id = ?)")
         .bind(person)
         .fetch_one(&mut *db)

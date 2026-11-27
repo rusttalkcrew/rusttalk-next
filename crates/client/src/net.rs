@@ -62,7 +62,10 @@ mod retry;
 pub mod terminal;
 mod voice;
 
-pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
+pub use admin::{
+    Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing, TakeDown, Takedown,
+    TakenDown,
+};
 pub use calendar::Change;
 pub use control::{ControlView, Ended};
 use directory::{directory, get};
