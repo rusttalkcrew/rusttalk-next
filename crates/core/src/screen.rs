@@ -867,21 +867,33 @@ mod tests {
         let preview = Preview::default();
         preview.set(true);
         let mut now = StdInstant::now();
-        let mut took = Duration::ZERO;
-        let rounds = 30;
-        for _ in 0..rounds {
+        let (mut handed, mut shrunk) = (Vec::new(), Vec::new());
+        for _ in 0..30 {
             // A fresh frame each time, as the capture sends.
             let frame = i420(3840, 2160);
             let offered = Instant::now();
             preview.offer(&frame, now);
-            took += offered.elapsed();
+            handed.push(offered.elapsed());
             drop(frame);
             assert!(next_copy(&preview).is_some());
             now += PREVIEW_PERIOD;
+            // What the capture would pay if it shrank the frame itself.
+            let mut frame = Arc::try_unwrap(i420(3840, 2160)).unwrap();
+            let start = Instant::now();
+            shrink(&mut frame);
+            shrunk.push(start.elapsed());
         }
-        let each = took / rounds;
-        println!("capture-side cost per 4K frame handed to the preview: {each:?}");
-        assert!(each < Duration::from_millis(1), "{each:?}");
+        // Compared on the same machine at the same time, by median: on a busy
+        // CI runner every round is slower, so a fixed limit failed there.
+        let median = |mut took: Vec<Duration>| {
+            took.sort();
+            took[took.len() / 2]
+        };
+        let (each, shrink) = (median(handed), median(shrunk));
+        println!(
+            "capture-side cost per 4K frame handed to the preview: {each:?}, shrinking it: {shrink:?}"
+        );
+        assert!(each < shrink, "{each:?} vs {shrink:?}");
     }
 
     #[test]
