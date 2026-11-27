@@ -387,6 +387,7 @@ fn text_draft(channel: Id, text: String, reply_to: Option<(Id, Id)>) -> Option<D
         edit_of: None,
         revision: 0,
         files: Vec::new(),
+        sensitive: false,
         keep: Vec::new(),
         sticker: None,
         friend: None,

@@ -2099,3 +2099,20 @@ nsfw.continue = Continue
 nsfw.go_back = Go back
 audit.nsfw_on = {actor} marked {channel} as NSFW
 audit.nsfw_off = {actor} unmarked {channel} as NSFW
+
+# crates/client/src/sensitive.rs and its places (#682)
+sensitive.label = Sensitive
+sensitive.tap_to_show = Sensitive, tap to show
+sensitive.blur = Blur
+sensitive.unblur = Show without blur
+sensitive.mark = Mark as sensitive
+sensitive.mark_help = Pictures and videos in this message show blurred until someone taps them.
+sensitive.section = Sensitive media
+sensitive.blur_marked = Blur marked pictures and videos
+sensitive.blur_marked_help = Blur what the sender marked as sensitive, until you tap it.
+sensitive.detect = Detect and blur automatically
+sensitive.detect_help = Your app checks pictures on this device and blurs likely nude ones. Nothing is sent anywhere.
+sensitive.nsfw = Show unblurred in NSFW channels
+sensitive.nsfw_help = In NSFW channels you agreed to enter, sensitive media shows without blur.
+sensitive.show_all = Show everything without blurring
+sensitive.show_all_help = Nothing is blurred, except pictures you blur yourself.

@@ -2095,3 +2095,20 @@ nsfw.continue = Doorgaan
 nsfw.go_back = Terug
 audit.nsfw_on = {actor} heeft {channel} als NSFW gemarkeerd
 audit.nsfw_off = {actor} heeft de NSFW-markering van {channel} verwijderd
+
+# crates/client/src/sensitive.rs and its places (#682), machine translated
+sensitive.label = Gevoelig
+sensitive.tap_to_show = Gevoelig, tik om te tonen
+sensitive.blur = Vervagen
+sensitive.unblur = Zonder vervaging tonen
+sensitive.mark = Markeren als gevoelig
+sensitive.mark_help = Afbeeldingen en video's in dit bericht worden vervaagd getoond tot iemand erop tikt.
+sensitive.section = Gevoelige media
+sensitive.blur_marked = Gemarkeerde afbeeldingen en video's vervagen
+sensitive.blur_marked_help = Wat de afzender als gevoelig heeft gemarkeerd, blijft vervaagd tot je erop tikt.
+sensitive.detect = Automatisch herkennen en vervagen
+sensitive.detect_help = Je app controleert afbeeldingen op dit apparaat en vervaagt waarschijnlijk naakte afbeeldingen. Er wordt niets verstuurd.
+sensitive.nsfw = Onvervaagd tonen in NSFW-kanalen
+sensitive.nsfw_help = In NSFW-kanalen waarmee je hebt ingestemd, worden gevoelige media zonder vervaging getoond.
+sensitive.show_all = Alles zonder vervaging tonen
+sensitive.show_all_help = Niets wordt vervaagd, behalve afbeeldingen die je zelf vervaagt.

@@ -15,6 +15,7 @@ Unreleased under the new version and date.
 - Adding many files to a channel's shared files at once no longer fails when the server asks you to slow down: the app waits a moment and carries on.
 - Server owners can remove illegal content with "Remove content" on a message or by pasting its ID in Server settings → Takedowns: the message, its edits and its files are deleted from the server, the account can be banned in the same step, and a record without the content is kept.
 - Channel managers can mark a channel NSFW. It shows an NSFW badge, and the first time you open it on a device you are asked whether to continue; your answer is remembered on that device only.
+- Sensitive pictures and videos show blurred until you tap them. Tick "Mark as sensitive" when sending, blur or unblur any picture from its menu, and choose in Settings → Privacy whether marked pictures blur and whether the app spots likely nude pictures on your device.
 
 ## v0.10.0 - 2026-11-27
 

@@ -2095,3 +2095,20 @@ nsfw.continue = 続ける
 nsfw.go_back = 戻る
 audit.nsfw_on = {actor} が {channel} を NSFW に設定しました
 audit.nsfw_off = {actor} が {channel} の NSFW 設定を解除しました
+
+# crates/client/src/sensitive.rs and its places (#682), machine translated
+sensitive.label = センシティブ
+sensitive.tap_to_show = センシティブ、タップして表示
+sensitive.blur = ぼかす
+sensitive.unblur = ぼかさずに表示
+sensitive.mark = センシティブとしてマーク
+sensitive.mark_help = このメッセージの画像と動画は、誰かがタップするまでぼかして表示されます。
+sensitive.section = センシティブなメディア
+sensitive.blur_marked = マークされた画像と動画をぼかす
+sensitive.blur_marked_help = 送信者がセンシティブとマークしたものを、タップするまでぼかします。
+sensitive.detect = 自動で検出してぼかす
+sensitive.detect_help = アプリがこのデバイス上で画像を確認し、裸の可能性が高いものをぼかします。どこにも送信されません。
+sensitive.nsfw = NSFWチャンネルではぼかさない
+sensitive.nsfw_help = 参加に同意したNSFWチャンネルでは、センシティブなメディアをぼかさずに表示します。
+sensitive.show_all = すべてぼかさずに表示
+sensitive.show_all_help = 自分でぼかした画像以外は何もぼかしません。

@@ -221,7 +221,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat, jumps:
                             let visible = ui.is_rect_visible(rect);
                             let play = ui.rect_contains_pointer(rect)
                                 || (visible && !hover_only && playing < PLAYING);
-                            let (response, jump) = files::gallery_tile(
+                            let (clicked, jump) = files::gallery_tile(
                                 ui,
                                 &mut home.files,
                                 &shot,
@@ -230,7 +230,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat, jumps:
                                 play,
                             );
                             playing += usize::from(play && visible && files::animates(&shot.file));
-                            if response.clicked() {
+                            if clicked {
                                 open = Some(n);
                             }
                             if jump {

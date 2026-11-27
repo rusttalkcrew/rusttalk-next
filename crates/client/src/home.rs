@@ -2117,6 +2117,7 @@ impl Home {
                     chat.open_draft(&server.dir, &draft.text);
                     chat.reply_to = draft.reply_to;
                     chat.editing = draft.edit_of;
+                    chat.mark_sensitive = draft.sensitive;
                     files::stage(chat, draft.files, max);
                 }
             }
@@ -2209,6 +2210,9 @@ pub fn show(
     let settings = home.voice.audio.snapshot();
     ui::apply(ui.ctx(), settings.appearance());
     emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
+    if home.files.sensitive.prefs != settings.sensitive {
+        home.files.sensitive.prefs = settings.sensitive.clone();
+    }
     crate::i18n::set(&settings.language);
     crate::i18n::set_clock(&settings.clock);
     if welcome::show(ui, home) {
@@ -4149,6 +4153,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
             server.send(Command::SetHideOffline(hide));
         }
     }
+    sensitive_media(ui, &mut settings.sensitive);
     ui::page_section(ui, t!("previews.section"));
     for provider in previews::PROVIDERS {
         let mut on = settings.link_previews.get(provider.id()) == Some(&true);
@@ -4211,6 +4216,44 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
     }
     audio.set_settings(settings);
     crate::key_storage::settings(ui, &mut home.key_storage, keystore, &home.identity);
+}
+
+/// "Sensitive media": what shows blurred until tapped. Showing everything turns the
+/// others off; a picture blurred from its own menu stays blurred.
+fn sensitive_media(ui: &mut Ui, prefs: &mut crate::sensitive::Prefs) {
+    ui::page_section(ui, t!("sensitive.section"));
+    let all = prefs.show_all;
+    ui.add_enabled_ui(!all, |ui| {
+        let rows = [
+            (
+                &mut prefs.blur_marked,
+                t!("sensitive.blur_marked"),
+                t!("sensitive.blur_marked_help"),
+            ),
+            (
+                &mut prefs.detect,
+                t!("sensitive.detect"),
+                t!("sensitive.detect_help"),
+            ),
+            (
+                &mut prefs.nsfw_unblurred,
+                t!("sensitive.nsfw"),
+                t!("sensitive.nsfw_help"),
+            ),
+        ];
+        for (on, label, help) in rows {
+            let mut shown = *on && !all;
+            if ui::toggle_row(ui, &mut shown, label, help).changed() {
+                *on = shown;
+            }
+        }
+    });
+    ui::toggle_row(
+        ui,
+        &mut prefs.show_all,
+        t!("sensitive.show_all"),
+        t!("sensitive.show_all_help"),
+    );
 }
 
 /// The configured directory and its optional certificate pin, or the official one.
@@ -4631,6 +4674,8 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
     }
     let kind = home.servers[index].channel(&channel).map(ChannelKind::of);
+    // Only while this channel draws; DMs and other screens never count as one.
+    home.files.sensitive.nsfw_here = crate::sensitive::agreed_nsfw(&home.servers[index], &channel);
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
     } else if gallery::shown(ui.ctx(), channel) {
@@ -4651,6 +4696,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             }
         }
     }
+    home.files.sensitive.nsfw_here = false;
     home.servers[index].chats.insert(channel, chat);
 }
 
@@ -5007,6 +5053,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     edit_of: None,
                     revision: 0,
                     files: chat.staged.drain(..).map(|file| file.path).collect(),
+                    sensitive: std::mem::take(&mut chat.mark_sensitive),
                     keep,
                     sticker: None,
                     friend: None,
@@ -5787,6 +5834,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         edit_of: None,
         revision: 0,
         files: Vec::new(),
+        sensitive: false,
         keep: Vec::new(),
         sticker: None,
         friend: None,
@@ -6407,6 +6455,7 @@ fn composer(
             edit_of: None,
             revision: 0,
             files: Vec::new(),
+            sensitive: false,
             keep: Vec::new(),
             sticker: id,
             friend: None,
@@ -6467,10 +6516,11 @@ fn composer(
         tracing::warn!("no randomness for a message ID");
         return (None, attach);
     };
-    let files = if editing {
-        Vec::new()
+    let (files, sensitive) = if editing {
+        (Vec::new(), false)
     } else {
-        chat.staged.drain(..).map(|file| file.path).collect()
+        let files = chat.staged.drain(..).map(|file| file.path).collect();
+        (files, std::mem::take(&mut chat.mark_sensitive))
     };
     let edit_of = chat.editing.take();
     let now_ms = SystemTime::now()
@@ -6487,6 +6537,7 @@ fn composer(
         edit_of,
         revision: edit_of.map_or(0, |original| chat.next_revision(dir.me, original, now_ms)),
         files,
+        sensitive,
         keep: Vec::new(),
         sticker: None,
         friend: None,
@@ -8261,6 +8312,7 @@ mod tests {
     mod rate_limits;
     mod reactions;
     mod reply_jump;
+    mod sensitive;
     mod server_emoji;
     mod settings_close;
     mod slow_mode;

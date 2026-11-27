@@ -327,6 +327,8 @@ pub struct Draft {
     pub revision: u64,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
+    /// Mark the pictures and videos among `files` as sensitive (see `sensitive`).
+    pub sensitive: bool,
     /// Files already stored in this channel, sent again with the message: a page
     /// keeps its pictures when it is saved as a new message.
     pub keep: Vec<rusttalk_core::client::Attachment>,
@@ -2858,10 +2860,21 @@ async fn on_command(
             );
             let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
             let max = state.max_files;
+            // The picked files come first after the kept ones.
+            let marked = if draft.sensitive {
+                draft.files.len()
+            } else {
+                0
+            };
             state.jobs.upload(draft, sent, target, async move {
                 let mut body = body;
                 let leftover =
                     files::upload_all(&ctx, &url, &blobs, (channel, max), &mut body, uploads).await;
+                for file in body.attachments.iter_mut().skip(kept).take(marked) {
+                    if crate::files::media_kind(file).is_some() {
+                        file.mark_sensitive();
+                    }
+                }
                 (body, leftover)
             });
         }

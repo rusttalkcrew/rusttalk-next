@@ -780,6 +780,43 @@ mod tests {
         assert!(decoded == body);
     }
 
+    /// The sensitive mark (#682) is a media type parameter: the same bytes every app
+    /// already reads, in both formats, within the existing size limit.
+    #[test]
+    fn the_sensitive_mark_rides_in_the_media_type() {
+        let mut file = Attachment {
+            file: BlobRef::for_tests([1; 32]),
+            name: "beach.jpg".into(),
+            media_type: "image/jpeg".into(),
+            thumbnail: None,
+        };
+        assert!(!file.sensitive());
+        assert!(file.mark_sensitive() && file.mark_sensitive());
+        assert_eq!(file.media_type, "image/jpeg;sensitive");
+        assert_eq!(file.plain_media_type(), "image/jpeg");
+        assert!(file.sensitive());
+        let body = MessageBody {
+            attachments: vec![file],
+            ..MessageBody::default()
+        };
+        for version in [2, 3] {
+            let decoded = MessageBody::decode(version, &body.encode(version).unwrap()).unwrap();
+            assert!(decoded == body && decoded.attachments[0].sensitive());
+            // What older apps look at: the kind before the `/`.
+            assert_eq!(
+                decoded.attachments[0].media_type.split('/').next(),
+                Some("image")
+            );
+        }
+        // A media type already at its limit can't take the mark, and stays valid.
+        let mut full = Attachment {
+            media_type: "b".repeat(MAX_MEDIA_TYPE - 1),
+            ..body.attachments[0].clone()
+        };
+        assert!(!full.mark_sensitive() && !full.sensitive());
+        assert!(full.validate().is_ok());
+    }
+
     #[test]
     fn key_links_round_trip_alone() {
         let body = MessageBody {

@@ -1053,6 +1053,8 @@ pub struct Chat {
     pub reacting: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
+    /// "Mark as sensitive" is ticked for the staged pictures and videos.
+    pub mark_sensitive: bool,
     /// Emoji of other servers picked for the draft; they go along as small files.
     pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
@@ -1569,6 +1571,7 @@ mod tests {
             edit_of: None,
             revision: 0,
             files: Vec::new(),
+            sensitive: false,
             keep: Vec::new(),
             sticker: None,
             friend: None,
