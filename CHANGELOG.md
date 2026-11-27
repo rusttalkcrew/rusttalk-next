@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The call view has its own control bar at the bottom: mute, sound, camera, screen share and hang up, with quick device choices.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

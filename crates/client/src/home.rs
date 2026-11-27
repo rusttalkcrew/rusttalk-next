@@ -4448,6 +4448,10 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     if let Some(rect) = stage {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         call::stage(&mut ui, home, index, channel);
+        // Phones have their row below; full screen brings its own.
+        if joined && !home.layout.phone && home.voice.stage.full.is_none() {
+            call::stage_controls(&mut ui, home, rect);
+        }
     }
     if let Some(rect) = chat {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));

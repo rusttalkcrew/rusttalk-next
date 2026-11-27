@@ -153,21 +153,38 @@ fn phones_show_call_controls_and_hide_the_chat_at_first() {
 }
 
 #[test]
-fn tablets_and_desktops_keep_controls_in_the_sidebar() {
+fn tablets_and_desktops_have_the_sidebar_and_a_floating_bar() {
     let data = tempfile::tempdir().unwrap();
     for dark in [true, false] {
         for size in [Vec2::new(820.0, 1180.0), Vec2::new(1100.0, 700.0)] {
             let mut h = in_call(dark, size, data.path());
             assert!(!home(&h).layout.phone);
-            // The chat shows beside the call as before, and the only leave button is
-            // the voice panel's in the sidebar.
+            // The chat shows beside the call as before. One leave button is the voice
+            // panel's in the sidebar, the other ends the call view's floating bar.
             assert!(!home(&h).layout.call_split().chat_hidden);
             assert!(h.query_by_label(t!("layout.hide_chat")).is_some());
-            let leave = h.get_by_label(t!("call.leave")).rect();
             let sidebar = RAIL_WIDTH + home(&h).layout.channels;
-            assert!(leave.right() <= sidebar, "{size:?}: {leave:?}");
-            assert!(leave.height() < ui::TOUCH_TARGET);
+            let leaves: Vec<_> = h
+                .query_all_by_label(t!("call.leave"))
+                .map(|node| node.rect())
+                .collect();
+            assert_eq!(leaves.len(), 2, "{size:?}");
+            let (panel, bar) = (leaves[0], leaves[1]);
+            assert!(panel.right() <= sidebar, "{size:?}: {panel:?}");
+            assert!(panel.height() < ui::TOUCH_TARGET);
+            assert!(bar.left() > sidebar, "{bar:?}");
+            assert!(h.query_by_label(t!("call.mic_options")).is_some());
             capture(&mut h, size, dark, "call");
+            // The bar's leave button hangs up like the sidebar's.
+            if size.x > 1000.0 {
+                h.query_all_by_label(t!("call.leave"))
+                    .nth(1)
+                    .unwrap()
+                    .click();
+                h.run_steps(2);
+                assert!(home(&h).voice.call.is_none());
+                continue;
+            }
         }
     }
 }
@@ -214,7 +231,9 @@ fn camera_button_opens_a_menu_while_on() {
             // Our own picture is only on the stage, never in a sidebar preview.
             assert!(h.query_by_label(t!("camera.preview")).is_none());
             assert!(h.query_by_label(t!("call.camera_off")).is_none());
-            let button = h.get_by_label(t!("camera.camera")).rect();
+            // On tablets the sidebar's card comes first, then the call view's bar.
+            let button = h.query_all_by_label(t!("camera.camera")).next().unwrap();
+            let button = button.rect();
             if size.x < 400.0 {
                 assert!(button.bottom() > size.y - 40.0, "the call view's bar");
             } else {
@@ -223,7 +242,8 @@ fn camera_button_opens_a_menu_while_on() {
             }
             capture(&mut h, size, dark, "camera");
 
-            h.get_by_label(t!("camera.camera")).click();
+            let button = h.query_all_by_label(t!("camera.camera")).next().unwrap();
+            button.click();
             h.run_steps(3);
             assert!(h.query_by_label(t!("camera.flip")).is_some());
             assert!(h.query_by_label(t!("camera.torch_on")).is_some());
@@ -249,7 +269,10 @@ fn camera_button_opens_a_menu_while_on() {
             // Only what the camera can do: one front camera, without a light.
             h.state_mut().as_mut().unwrap().0.voice.camera.fake = Some(Controls::default());
             h.run_steps(2);
-            h.get_by_label(t!("camera.camera")).click();
+            h.query_all_by_label(t!("camera.camera"))
+                .next()
+                .unwrap()
+                .click();
             h.run_steps(3);
             assert!(h.query_by_label(t!("camera.flip")).is_none());
             assert!(h.query_by_label(t!("camera.torch_on")).is_none());
@@ -259,7 +282,10 @@ fn camera_button_opens_a_menu_while_on() {
             assert!(h.query_by_label(t!("call.camera_off")).is_none());
 
             // Off, a tap turns it straight back on.
-            h.get_by_label(t!("call.camera_on")).click();
+            h.query_all_by_label(t!("call.camera_on"))
+                .next()
+                .unwrap()
+                .click();
             h.run_steps(3);
             assert!(home(&h).voice.camera.on);
             assert!(h.query_by_label(t!("call.camera_off")).is_none(), "no menu");

@@ -150,7 +150,11 @@ fn starting_a_diagram_presents_it_and_edits_go_out() {
         let (mut h, mut commands) = in_call(dark, size, data.path(), false);
         sent(&mut commands);
         // Available without a terminal, from the "…" menu.
-        h.get_by_label(t!("call.more")).click();
+        // The sidebar's on computers; the call view's bar has one too.
+        h.query_all_by_label(t!("call.more"))
+            .next()
+            .unwrap()
+            .click();
         h.run_steps(2);
         h.get_by_label(t!("diagram.start")).click();
         h.run_steps(2);

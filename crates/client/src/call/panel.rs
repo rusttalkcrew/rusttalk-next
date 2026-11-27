@@ -5,7 +5,7 @@
 use std::{collections::VecDeque, sync::Mutex};
 
 use eframe::egui::{
-    self, Align, Color32, CursorIcon, Frame, Label, Layout, Margin, Response, RichText, Role,
+    self, Align, Color32, CursorIcon, Frame, Label, Layout, Margin, Rect, Response, RichText, Role,
     Sense, Ui, Vec2, WidgetInfo,
 };
 use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
@@ -403,6 +403,188 @@ pub fn phone_control_count(home: &mut Home) -> usize {
     3 + Extras::of(&mut home.voice, app_audio).count()
 }
 
+/// The floating bar's buttons and the chevrons beside them.
+const BAR_BUTTON: f32 = ui::TOUCH_TARGET;
+const BAR_CHEVRON: f32 = 18.0;
+
+/// The call's controls in a pill floating at the bottom of the call view (`area`) on
+/// tablets and computers: mic, sound, camera and screen, each with a chevron for its
+/// choices, "More" and hang up. The same buttons as the voice panel. Returns the bar's
+/// rect so the stage can keep its own clicks out of it.
+pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> {
+    let can = Can::of(home)?;
+    let extras = Extras::of(&mut home.voice, false);
+    let buttons = 5 + usize::from(extras.screen);
+    let chevrons = 3 + usize::from(extras.screen);
+    let gaps = (buttons + chevrons) as f32 * SPACE_XS + ui::SPACE_S;
+    let full = buttons as f32 * BAR_BUTTON + chevrons as f32 * BAR_CHEVRON + gaps;
+    let room = area.width() - 2.0 * ui::SPACE_S;
+    // Narrow windows drop the chevrons first, then shrink the buttons.
+    let with_chevrons = full <= room;
+    let bare = full - chevrons as f32 * (BAR_CHEVRON + SPACE_XS);
+    let width = if with_chevrons { full } else { bare.min(room) };
+    let button = if with_chevrons || bare <= room {
+        BAR_BUTTON
+    } else {
+        ((room - (gaps - chevrons as f32 * SPACE_XS)) / buttons as f32).max(ui::ICON_BUTTON)
+    };
+    let height = BAR_BUTTON + 2.0 * SPACE_XS;
+    let rect = Rect::from_center_size(
+        egui::pos2(area.center().x, area.bottom() - ui::SPACE_S - height / 2.0),
+        Vec2::new(width + 2.0 * SPACE_XS, height),
+    );
+    let c = ui::colors(ui);
+    let round = egui::CornerRadius::same((height / 2.0) as u8);
+    ui.painter().rect_filled(rect, round, c.side);
+    ui.painter().rect_stroke(
+        rect,
+        round,
+        egui::Stroke::new(1.0, c.border),
+        egui::StrokeKind::Inside,
+    );
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(SPACE_XS))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    bar.spacing_mut().item_spacing.x = SPACE_XS;
+    let size = Vec2::splat(button);
+    let chevron = Vec2::new(BAR_CHEVRON, button);
+    let mut picked = Picked::default();
+    let mut video_settings = false;
+    let ui = &mut bar;
+    let audio = home.voice.audio.clone();
+    let (inputs, outputs) = audio.devices();
+    user_bar::mic_button(ui, home, size);
+    if with_chevrons {
+        let more = ui::chevron_button(ui, t!("call.mic_options"), chevron);
+        let mut s = audio.settings();
+        if let Some(Some(pick)) = ui::menu_above(&more, |m| {
+            device_menu(m, t!("call.microphone"), &s.input, &inputs, &mut picked)
+        }) {
+            s.input = pick;
+            audio.set_settings(s);
+        }
+    }
+    user_bar::deafen_button(ui, home, size);
+    if with_chevrons {
+        let more = ui::chevron_button(ui, t!("call.sound_options"), chevron);
+        let mut s = audio.settings();
+        if let Some(Some(pick)) = ui::menu_above(&more, |m| {
+            device_menu(m, t!("call.speakers"), &s.output, &outputs, &mut picked)
+        }) {
+            s.output = pick;
+            audio.set_settings(s);
+        }
+    }
+    camera_button(ui, &mut home.voice, &can, size);
+    if with_chevrons {
+        let more = ui::chevron_button(ui, t!("call.camera_options"), chevron);
+        let found = if ui::menu_open(&more) {
+            home.voice.camera.found(ui.ctx())
+        } else {
+            Vec::new()
+        };
+        let mut s = audio.settings();
+        if let Some(Some(pick)) = ui::menu_above(&more, |m| {
+            let pick = camera_choices(m, &s.camera, &found);
+            m.separator();
+            video_settings = m.item("⚙", t!("call.video_settings")).clicked();
+            pick
+        }) {
+            s.camera = pick;
+            audio.set_settings(s);
+        }
+    }
+    if extras.screen {
+        screen_button(ui, &mut home.voice, &can, size, &mut picked);
+        if with_chevrons {
+            let more = ui
+                .add_enabled_ui(can.connected && can.share_video, |ui| {
+                    ui::chevron_button(ui, t!("call.screen_options"), chevron)
+                })
+                .inner;
+            let sharing = home.voice.sharing;
+            ui::menu_above(&more, |m| {
+                if sharing == Sharing::Off {
+                    if m.item("🖥", t!("call.share_screen")).clicked() {
+                        open_screen_dialog(m.ui().ctx(), &mut home.voice);
+                    }
+                    return;
+                }
+                if m.item("🖥", t!("call.change_my_share")).clicked() {
+                    picked.change_screen = true;
+                }
+                if m.danger("⏹", t!("call.stop_sharing")).clicked() {
+                    picked.stop_screen = true;
+                }
+            });
+        }
+    }
+    let talk = can.connected && can.blocked.is_none();
+    let can_call = extras.phone && talk;
+    let terminal = extras.terminal;
+    (picked.terminal, picked.diagram) =
+        more_button(ui, &mut home.voice, terminal, can_call, can.connected, size);
+    ui.separator();
+    picked.leave = leave_button(ui, size).clicked();
+    apply(ui, home, picked);
+    if video_settings {
+        home.settings = Some(Tab::Video);
+    }
+    Some(rect)
+}
+
+/// A device list for a chevron menu: the system default, then each device, with a
+/// tick on `chosen`. Returns the pick; voice settings sit at the bottom.
+fn device_menu(
+    m: &mut ui::Menu,
+    title: &str,
+    chosen: &Option<String>,
+    devices: &[crate::audio::DeviceInfo],
+    picked: &mut Picked,
+) -> Option<Option<String>> {
+    m.caption(title);
+    let mut pick = None;
+    let default = ui::Item::new("", t!("common.system_default")).picked(chosen.is_none());
+    if m.add(default).clicked() {
+        pick = Some(None);
+    }
+    for device in devices {
+        let on = chosen.as_ref() == Some(&device.id);
+        if m.add(ui::Item::new("", &device.name).picked(on)).clicked() {
+            pick = Some(Some(device.id.clone()));
+        }
+    }
+    m.separator();
+    if m.item("⚙", t!("call.voice_settings")).clicked() {
+        picked.voice_settings = true;
+    }
+    pick
+}
+
+/// The cameras for the camera chevron's menu, with a tick on `chosen`.
+fn camera_choices(
+    m: &mut ui::Menu,
+    chosen: &Option<String>,
+    found: &[String],
+) -> Option<Option<String>> {
+    m.caption(t!("camera.camera"));
+    let mut pick = None;
+    let first = ui::Item::new("", t!("camera.first")).picked(chosen.is_none());
+    if m.add(first).clicked() {
+        pick = Some(None);
+    }
+    for name in found {
+        let label = crate::camera::camera_label(name);
+        let on = chosen.as_ref() == Some(name);
+        if m.add(ui::Item::new("", &label).picked(on)).clicked() {
+            pick = Some(Some(name.clone()));
+        }
+    }
+    pick
+}
+
 fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
     ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, size)
 }
@@ -483,35 +665,7 @@ fn share_buttons(
 ) {
     camera_button(ui, voice, can, size);
     if extras.screen {
-        let look = if voice.sharing == Sharing::Off {
-            Look::Plain
-        } else {
-            Look::On(ui::colors(ui).success)
-        };
-        let button = ui
-            .add_enabled_ui(can.connected && can.share_video, |ui| {
-                ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
-            })
-            .inner;
-        if voice.sharing == Sharing::On {
-            ui::context_menu(&button, |m| {
-                if m.item("🖥", t!("call.change_my_share")).clicked() {
-                    picked.change_screen = true;
-                }
-                if m.danger("⏹", t!("call.stop_sharing")).clicked() {
-                    picked.stop_screen = true;
-                }
-            });
-        }
-        if !can.share_video {
-            button.on_disabled_hover_text(t!("call.no_screen_here"));
-        } else if button.clicked() {
-            if voice.sharing == Sharing::Off {
-                open_screen_dialog(ui.ctx(), voice);
-            } else {
-                picked.stop_screen = true;
-            }
-        }
+        screen_button(ui, voice, can, size, picked);
     }
     let talk = can.connected && can.blocked.is_none();
     if extras.app_audio {
@@ -520,6 +674,39 @@ fn share_buttons(
     let can_call = extras.phone && talk;
     let more = more_button(ui, voice, extras.terminal, can_call, can.connected, size);
     (picked.terminal, picked.diagram) = more;
+}
+
+/// Share the screen, or stop sharing; right-click while sharing to change or stop.
+fn screen_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2, picked: &mut Picked) {
+    let look = if voice.sharing == Sharing::Off {
+        Look::Plain
+    } else {
+        Look::On(ui::colors(ui).success)
+    };
+    let button = ui
+        .add_enabled_ui(can.connected && can.share_video, |ui| {
+            ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
+        })
+        .inner;
+    if voice.sharing == Sharing::On {
+        ui::context_menu(&button, |m| {
+            if m.item("🖥", t!("call.change_my_share")).clicked() {
+                picked.change_screen = true;
+            }
+            if m.danger("⏹", t!("call.stop_sharing")).clicked() {
+                picked.stop_screen = true;
+            }
+        });
+    }
+    if !can.share_video {
+        button.on_disabled_hover_text(t!("call.no_screen_here"));
+    } else if button.clicked() {
+        if voice.sharing == Sharing::Off {
+            open_screen_dialog(ui.ctx(), voice);
+        } else {
+            picked.stop_screen = true;
+        }
+    }
 }
 
 /// Carry out what the call's buttons asked for.

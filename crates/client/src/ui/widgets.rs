@@ -131,6 +131,28 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, tip: &str, look: Look, size: Vec2) 
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A narrow ghost button with a small down chevron, beside an icon button, that opens
+/// that button's choices (devices and the like). `tip` is its accessible name.
+pub fn chevron_button(ui: &mut Ui, tip: &str, size: Vec2) -> Response {
+    let response = icon_button(ui, "", tip, Look::Ghost, size);
+    let color = if response.hovered() {
+        colors(ui).strong
+    } else {
+        colors(ui).muted
+    };
+    let center = response.rect.center();
+    let (w, h) = (3.5, 2.0);
+    ui.painter().line(
+        vec![
+            center + Vec2::new(-w, -h),
+            center + Vec2::new(0.0, h),
+            center + Vec2::new(w, -h),
+        ],
+        Stroke::new(1.5, color),
+    );
+    response
+}
+
 /// The accent outline of a widget that has keyboard focus.
 pub fn focus_ring(ui: &Ui, response: &Response, radius: u8) {
     if response.has_focus() {
