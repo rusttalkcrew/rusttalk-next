@@ -137,6 +137,7 @@ fn message_menus_offer_only_allowed_actions_in_order() {
         assert!(shows(&h, label), "{label}");
     }
     assert!(!shows(&h, t!("files.copy_image")));
+    assert!(!shows(&h, t!("reports.report")), "my own message");
     // Delete comes last, below Copy message ID.
     let id = h.get_by_label(t!("home.copy_message_id")).rect().top();
     let delete = (h.query_all_by_label(t!("common.delete")))
@@ -160,7 +161,11 @@ fn message_menus_offer_only_allowed_actions_in_order() {
     assert!(shows(&h, t!("home.copy_message_id")));
     assert!(!shows(&h, t!("common.edit")), "not mine to edit");
     assert!(!shows(&h, t!("common.delete")), "no right to delete");
-    close_menu(&mut h);
+    // Someone else's message can be reported.
+    h.get_by_label(t!("reports.report")).click();
+    h.run_steps(3);
+    let dialog = &h.state().as_ref().unwrap().dialog;
+    assert!(matches!(dialog, Some(Dialog::Report(draft)) if draft.message == [2; 32]));
 }
 
 #[test]

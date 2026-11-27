@@ -6,6 +6,7 @@ mod chat;
 mod files;
 mod keys;
 mod metadata;
+mod reports;
 pub mod revocations;
 mod server;
 pub mod sync;
@@ -27,6 +28,10 @@ pub use files::{
 };
 pub use keys::{DmPin, KeyClient, Step, Verified, invite_name};
 pub use metadata::{decode_profile_first_frame, decode_profile_image};
+pub use reports::{
+    AlreadyReported, Checked, ReceivedReport, RecipientsChanged, RecipientsUnchecked,
+    ReportRefused, Unreadable, Visible, check_reviewers, recipients, removed_by,
+};
 pub use server::{Server, save_json};
 
 use std::time::Duration;

@@ -1,5 +1,5 @@
 use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
+    ChaCha20Poly1305, KeyInit, Nonce, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
 use ed25519_dalek::Signer;
@@ -430,6 +430,59 @@ impl MessageContext {
             XChaCha20Poly1305::new(&(**key).into())
                 .decrypt(
                     &XNonce::from(nonce),
+                    Payload {
+                        msg: &envelope[HEADER..envelope.len() - SIGNATURE],
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| MessageError::Authentication)?,
+        );
+        MessageBody::decode(envelope[0], &plaintext)
+    }
+
+    /// The key of this one message, for a report: XChaCha20-Poly1305 is ChaCha20-Poly1305
+    /// under HChaCha20(epoch key, first 16 nonce bytes). The nonce is random per message,
+    /// and HChaCha20 is a PRF, so this key opens only this envelope and reveals nothing
+    /// about the epoch key or other messages. Checks the signature first, so only a
+    /// verified envelope is disclosed.
+    pub fn disclose(
+        self,
+        key: &Key,
+        sender: &DeviceCertificate,
+        envelope: &[u8],
+    ) -> Result<Key, MessageError> {
+        if sender.person_id() != &self.person {
+            return Err(MessageError::Signature);
+        }
+        self.verify_as(Purpose::Message, sender.signing_key(), envelope)?;
+        let prefix: [u8; 16] = envelope[1..17].try_into().expect("verified length");
+        let subkey = chacha20::hchacha::<chacha20::R20>(&(**key).into(), &prefix.into());
+        let message_key = Key::new(subkey.into());
+        // Only disclose a key that really opens the message.
+        self.open_disclosed(&message_key, sender, envelope)?;
+        Ok(message_key)
+    }
+
+    /// Open a reported message with its disclosed key (see `disclose`): the sender's
+    /// signature over the associated data and ciphertext, then ChaCha20-Poly1305 with the
+    /// last 8 nonce bytes. Fails for any other key, envelope, context or sender.
+    pub fn open_disclosed(
+        self,
+        message_key: &Key,
+        sender: &DeviceCertificate,
+        envelope: &[u8],
+    ) -> Result<MessageBody, MessageError> {
+        if sender.person_id() != &self.person {
+            return Err(MessageError::Signature);
+        }
+        self.verify_as(Purpose::Message, sender.signing_key(), envelope)?;
+        let aad = self.associated_data(Purpose::Message);
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&envelope[17..1 + NONCE]);
+        let plaintext = Zeroizing::new(
+            ChaCha20Poly1305::new(&(**message_key).into())
+                .decrypt(
+                    &Nonce::from(nonce),
                     Payload {
                         msg: &envelope[HEADER..envelope.len() - SIGNATURE],
                         aad: &aad,

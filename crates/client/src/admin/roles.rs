@@ -859,6 +859,15 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
             false,
         ));
     }
+    // And for reports: reviewers read the reported messages, so it needs care.
+    if knows("review_reports") {
+        groups[2].1.push((
+            "review_reports",
+            t!("perm.review_reports"),
+            t!("perm.review_reports_help"),
+            true,
+        ));
+    }
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);
@@ -884,6 +893,15 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
                     }
                 });
             });
+            // A report is sealed to every reviewer device, up to a limit.
+            if permission == "review_reports" {
+                let devices = super::reports::reviewer_devices(dir, Some((&role.id, chosen)));
+                if devices >= super::reports::DEVICES_WARNING {
+                    let text = t!("reports.reviewer_devices_warning", count = devices);
+                    let warning = ui::colors(ui).warning;
+                    ui.label(eframe::egui::RichText::new(text).color(warning));
+                }
+            }
         }
     }
 }

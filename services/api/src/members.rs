@@ -757,16 +757,26 @@ pub async fn audit_log(
         .require(Permission::ViewAuditLog)?;
     let rows = query_as::<_, AuditRow>(&format!(
         "SELECT id, actor_person_id, action, target_person_id, target_id, details, at
-                                       FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?)
+                                       FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?
+                                           -- The Reports filter covers DM reports too.
+                                           OR (? = 'report_resolved' AND action IN ('dm_report_resolved', 'reports_dismissed',
+                                               'dm_reports_dismissed')))
                                        AND (dm_channel_id IS NULL OR EXISTS (
                                            SELECT 1 FROM channel_readers r
                                            WHERE r.channel_id = dm_channel_id AND r.person_id = ?
+                                       ))
+                                       -- DM reports are the owner's alone.
+                                       AND (action NOT IN ('dm_report_resolved', 'dm_reports_dismissed') OR EXISTS (
+                                           SELECT 1 FROM server_settings
+                                           WHERE id = 1 AND owner_person_id = ?
                                        )) ORDER BY id {order} LIMIT ?"
     ))
     .bind(after)
     .bind(before.unwrap_or(i64::MAX))
     .bind(&action)
     .bind(&action)
+    .bind(&action)
+    .bind(actor.person.as_slice())
     .bind(actor.person.as_slice())
     .bind(limit)
     .fetch_all(&mut *tx)
