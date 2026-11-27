@@ -325,6 +325,18 @@ fn paint_picture(ui: &Ui, rect: Rect, picture: Picture) {
     if picture.mirrored {
         uv = Rect::from_min_max(pos2(uv.max.x, uv.min.y), pos2(uv.min.x, uv.max.y));
     }
+    // The texture's width at this size, for `upload_camera` to shrink the next frame to.
+    let ctx = ui.ctx();
+    let (pass, ppp) = (ctx.cumulative_pass_nr(), ctx.pixels_per_point());
+    let width = rect.width() * ppp / uv.width().abs().max(f32::EPSILON);
+    let id = super::drawn_width_id(picture.texture);
+    ctx.data_mut(|data| {
+        let widest = match data.get_temp::<(u64, f32)>(id) {
+            Some((drawn, before)) if drawn == pass => before.max(width),
+            _ => width,
+        };
+        data.insert_temp(id, (pass, widest));
+    });
     Image::new((picture.texture, picture.size))
         .uv(uv)
         .corner_radius(ui::RADIUS)
@@ -335,7 +347,7 @@ fn paint_picture(ui: &Ui, rect: Rect, picture: Picture) {
 fn camera_picture(ctx: &egui::Context, voice: &mut Voice, sid: &str) -> Option<Picture> {
     let slot = voice.cameras.get_mut(sid)?;
     if let Some(image) = voice.video.take(sid) {
-        upload(ctx, slot, sid, image);
+        super::upload_camera(ctx, slot, sid, image);
     }
     let texture = slot.as_ref()?;
     Some(Picture {

@@ -1164,6 +1164,66 @@ pub fn fill<T: Send + 'static>(
     });
 }
 
+/// Where a texture's widest drawing last pass is kept, in physical pixels.
+pub(crate) fn drawn_width_id(texture: egui::TextureId) -> egui::Id {
+    egui::Id::unique(("drawn width", texture))
+}
+
+/// `upload` for a camera: halved, each pixel the average of four, while it is at least
+/// twice as wide as it was last drawn. egui's wgpu renderer has no mipmaps, so a big
+/// picture in a small tile would skip most pixels and turn sensor noise into grain.
+pub fn upload_camera(
+    ctx: &egui::Context,
+    slot: &mut Option<TextureHandle>,
+    name: &str,
+    image: ColorImage,
+) {
+    let drawn = slot.as_ref().and_then(|texture| {
+        ctx.data(|data| data.get_temp::<(u64, f32)>(drawn_width_id(texture.id())))
+    });
+    let image = match drawn {
+        Some((_, width)) => shrink(image, width),
+        None => image,
+    };
+    upload(ctx, slot, name, image);
+}
+
+/// Halve `image` until it is less than twice `width` wide.
+pub(crate) fn shrink(mut image: ColorImage, width: f32) -> ColorImage {
+    while image.size[0] as f32 >= 2.0 * width && image.size[0] >= 4 && image.size[1] >= 4 {
+        image = halve(&image);
+    }
+    image
+}
+
+fn halve(image: &ColorImage) -> ColorImage {
+    let [w, h] = image.size;
+    let (half_w, half_h) = (w / 2, h / 2);
+    let mut pixels = Vec::with_capacity(half_w * half_h);
+    for y in 0..half_h {
+        let (top, bottom) = (2 * y * w, (2 * y + 1) * w);
+        for x in 0..half_w {
+            let four = [
+                image.pixels[top + 2 * x],
+                image.pixels[top + 2 * x + 1],
+                image.pixels[bottom + 2 * x],
+                image.pixels[bottom + 2 * x + 1],
+            ];
+            let mean = |channel: usize| {
+                let sum: u16 = four.iter().map(|c| u16::from(c.to_array()[channel])).sum();
+                ((sum + 2) / 4) as u8
+            };
+            pixels.push(egui::Color32::from_rgba_premultiplied(
+                mean(0),
+                mean(1),
+                mean(2),
+                mean(3),
+            ));
+        }
+    }
+    ColorImage::new([half_w, half_h], pixels)
+}
+
 /// Show `image` in the texture in `slot`, creating it on first use.
 pub fn upload(
     ctx: &egui::Context,
@@ -1769,6 +1829,33 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_camera_shrinks_to_how_wide_it_was_drawn_by_averaging() {
+        use egui::Color32;
+        // A checkerboard of black and white, like fine sensor noise.
+        let (w, h) = (1920, 1080);
+        let pixels = (0..w * h)
+            .map(|i| {
+                if (i % w + i / w) % 2 == 0 {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                }
+            })
+            .collect();
+        let image = ColorImage::new([w, h], pixels);
+        // Drawn 640 px wide: halved once to 960, still under twice 640.
+        let small = shrink(image.clone(), 640.0);
+        assert_eq!(small.size, [960, 540]);
+        // Averaged, not picked: every pixel is mid grey, no black or white left.
+        assert!(small.pixels.iter().all(|c| (127..=128).contains(&c.r())));
+        // Drawn at full width or wider, or tiny images: untouched.
+        assert_eq!(shrink(image.clone(), 1920.0).size, [1920, 1080]);
+        assert_eq!(shrink(image, 1000.0).size, [1920, 1080]);
+        let tiny = ColorImage::new([3, 3], vec![Color32::RED; 9]);
+        assert_eq!(shrink(tiny, 0.0).size, [3, 3]);
+    }
 
     #[test]
     fn call_tick_is_slow_unless_something_live_shows() {
