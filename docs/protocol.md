@@ -146,6 +146,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
 | GET `/v1/settings/message-history` | Empty | Any member. 200, `{keep, ceiling?}` |
 | PUT `/v1/settings/message-history` | `{keep}` | `manage_server`. 200, the saved `{keep, ceiling?}` |
+| GET `/v1/settings/rate-limits` | Empty | Any member. 200, `{preset, ceiling?}` |
+| PUT `/v1/settings/rate-limits` | `{preset}` | `manage_server`. 200, the saved `{preset, ceiling?}` |
 | GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before` |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
@@ -166,6 +168,21 @@ someone saves one it is 10,000. `ceiling` is present only when the host set
 lowers a saved `keep` (including `0`) to it. A lower `keep` deletes older
 messages in every channel before PUT returns, one channel per transaction,
 with a `message_deleted` event per message. Older servers answer 404.
+
+Each member's requests are rate limited with token buckets kept in memory (reset
+on restart). `preset` is `strict`, `standard` (the default) or `relaxed`;
+relaxed allows four times the standard rates, strict half. Standard allows, per
+person: message posts (messages, edits, reactions, votes and friend messages
+alike, since the server cannot tell them apart) a burst of 20, then 1 a second;
+DM history backfill posts 30, then 2 a second; message deletes 10, then 1 a
+second; file uploads 60, then 2 a second, and 512 MiB, then 2 MiB a
+second (counted after each upload); new DMs 10, then 10 an hour; invites 20,
+then 20 an hour; status and idle changes 5, then 1 a second. Every
+authenticated request counts toward 300, then 30 a second, per session, and
+four times that per address (an IPv6 /64). Over a limit the server answers
+`429 rate_limited` with `Retry-After`. `ceiling` is present only when the host
+set `RUSTTALK_RATE_LIMITS`; that preset is then also the default, and the
+server keeps a looser saved preset at it. Older servers answer 404.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
@@ -281,7 +298,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
-| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit`, `new_dm_limit`, `slow_mode` (with a `Retry-After` header and `retry_after`, both in seconds) |
+| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit`, `new_dm_limit`, `slow_mode`, `rate_limited` (all with a `Retry-After` header and `retry_after`, both in seconds) |
 | 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_event`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
 | 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
 | 503 | `file_upload_busy`, `voice_unavailable` |

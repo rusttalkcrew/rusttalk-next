@@ -17,6 +17,7 @@ Unreleased under the new version and date.
 - Block someone from their profile card, right-click menu or the Friends list: their messages in servers fold into a "Blocked message" line you can open, their voice is muted for you, and their DMs, pokes and friend requests don't reach you. Manage the list in Settings → Privacy; it follows you to your other devices and servers never see it.
 - DMs from people who aren't your friends now wait under Message requests, quietly, until you accept, delete or block them. In Privacy settings you choose who can message you: everyone, server members (as requests) or friends only. Servers limit how many new DMs someone can start per hour.
 - Channel managers can turn on slow mode for a busy channel, from 5 seconds to 6 hours between each member's messages. The message box counts down until you can send again, and moderators can skip the wait.
+- Servers now slow down members who post, react, upload or invite much faster than a person could, and owners pick Relaxed, Standard or Strict in Server settings; a message sent too fast waits a moment and goes out by itself.
 
 ## v0.9.1 - 2026-11-26
 

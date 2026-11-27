@@ -37,6 +37,10 @@ const TRANSFER_IDLE: Duration = Duration::from_secs(30);
 const TRANSFER_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// Upload body piece size; each piece taken by the connection counts as progress.
 const UPLOAD_PIECE: usize = 64 * 1024;
+/// How often, and how long at most, an upload waits when the server asks it to slow
+/// down. Uploads run beside the event loop, so waiting holds up nothing else.
+const SLOW_DOWN_TRIES: u32 = 5;
+const SLOW_DOWN_WAIT: Duration = Duration::from_secs(15);
 
 /// Called with the bytes moved so far and the total, as a transfer goes.
 pub type Progress = Arc<dyn Fn(u64, u64) + Send + Sync>;
@@ -118,14 +122,56 @@ impl FileClient {
         struct Uploaded {
             id: String,
         }
-        let ciphertext = seal(reference, bytes)?;
+        let ciphertext: Arc<[u8]> = seal(reference, bytes)?.into();
         #[derive(Deserialize)]
         struct Problem {
             error: String,
         }
+        let mut tries = 0;
+        let response = loop {
+            let response = self
+                .send_blob(channel, reference, &ciphertext, &progress)
+                .await?;
+            // Asked to slow down: wait as asked, a few times, then fail as before.
+            match super::RateLimited::from_response(&response) {
+                Some(super::RateLimited(wait))
+                    if tries < SLOW_DOWN_TRIES && wait <= SLOW_DOWN_WAIT =>
+                {
+                    tries += 1;
+                    tracing::info!(?wait, "upload rate limited; trying again");
+                    time::sleep(wait).await;
+                }
+                _ => break response,
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let code = response.json::<Problem>().await.map(|p| p.error);
+            return Err(UploadRejected {
+                status,
+                code: code.unwrap_or_default(),
+            }
+            .into());
+        }
+        let uploaded: Uploaded = response.json().await?;
+        ensure!(
+            decode::<32>(&uploaded.id)? == reference.id,
+            "wrong uploaded file ID"
+        );
+        Ok(())
+    }
+
+    async fn send_blob(
+        &self,
+        channel: &[u8; 32],
+        reference: &BlobRef,
+        ciphertext: &Arc<[u8]>,
+        progress: &Option<Progress>,
+    ) -> Result<reqwest::Response> {
         let taken = Arc::new(AtomicUsize::new(0));
         let pieces = {
-            let taken = taken.clone();
+            let (taken, ciphertext, progress) =
+                (taken.clone(), ciphertext.clone(), progress.clone());
             let ends = (UPLOAD_PIECE..ciphertext.len() + UPLOAD_PIECE).step_by(UPLOAD_PIECE);
             let total = ciphertext.len() as u64;
             stream::iter(ends.map(move |end| {
@@ -145,28 +191,13 @@ impl FileClient {
             .body(Body::wrap_stream(pieces))
             .send();
         let mut send = std::pin::pin!(send);
-        let response = loop {
+        loop {
             let before = taken.load(Ordering::Relaxed);
             match time::timeout(TRANSFER_IDLE, &mut send).await {
-                Ok(response) => break response?,
+                Ok(response) => return Ok(response?),
                 Err(_) => ensure!(taken.load(Ordering::Relaxed) != before, "upload stalled"),
             }
-        };
-        let status = response.status();
-        if !status.is_success() {
-            let code = response.json::<Problem>().await.map(|p| p.error);
-            return Err(UploadRejected {
-                status,
-                code: code.unwrap_or_default(),
-            }
-            .into());
         }
-        let uploaded: Uploaded = response.json().await?;
-        ensure!(
-            decode::<32>(&uploaded.id)? == reference.id,
-            "wrong uploaded file ID"
-        );
-        Ok(())
     }
 
     /// Download a file or thumbnail and return bytes only after authenticating the entire blob.

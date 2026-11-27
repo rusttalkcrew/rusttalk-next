@@ -269,6 +269,22 @@ are stored and expire separately, so 10,000 messages in a channel take at most
 about 100 MiB of database space. With everything kept, keep an eye on free
 disk space.
 
+## Rate limits
+
+The API limits how fast each member posts, reacts, edits, deletes, uploads,
+starts DMs, creates invites and changes their status, and how many requests a
+session and an address make, so a script with a valid account cannot flood the
+server. A normal person never notices; the app waits and retries a message the
+server asked it to slow down for. A member who keeps hitting a limit is logged
+(person ID only) at most once a minute. Limits live in memory and reset on
+restart.
+
+A member with Manage Server picks **Relaxed**, **Standard** (the default) or
+**Strict** in **Server settings → Rate limits**. To cap what owners can choose,
+set `RUSTTALK_RATE_LIMITS` to `strict`, `standard` or `relaxed` on the API: a
+set value is both the loosest preset owners may pick and the default. Unset or
+empty means no cap. The numbers are in `docs/protocol.md`.
+
 ## Server emoji limits
 
 | Variable | Default |

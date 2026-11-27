@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{query, query_scalar};
 
-use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, payload, store::now};
+use crate::{
+    ApiError, ApiResult, App, Change, auth::authenticate, keys, limits, payload, store::now,
+};
 
 /// New DM conversations one person may start on this server per hour. Enough for
 /// someone joining a server full of people they already talk to (each needs a copy
@@ -120,6 +122,8 @@ pub async fn create(
         return Ok((StatusCode::OK, Json(json!({ "id": id }))));
     }
     app.dm_starts.take(actor.person, now()?)?;
+    // Only a new conversation counts: reopening one is free.
+    app.limits.check(&actor, limits::Action::NewDm)?;
     let reserved = query("INSERT INTO channel_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
         .execute(&mut *tx)

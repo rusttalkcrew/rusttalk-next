@@ -18,7 +18,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate, authenticate_read},
-    channels, history, keys, page_files, payload,
+    channels, history, keys, limits, page_files, payload,
     roles::{self, Permission},
     slow_mode,
     store::audit,
@@ -153,6 +153,11 @@ pub async fn create(
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let action = match backfill_at {
+        Some(_) => limits::Action::Backfill,
+        None => limits::Action::Post,
+    };
+    app.limits.check(&actor, action)?;
     require_write(&mut tx, &actor, &channel).await?;
     let page = page_files::is_page(&mut tx, &channel).await?;
     let keep = match keep.is_empty() {
@@ -469,6 +474,7 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    app.limits.check(&actor, limits::Action::Delete)?;
     let kind = chat_kind(&mut tx, &actor, &channel).await?;
     let sender: Vec<u8> =
         query_scalar("SELECT sender_person FROM messages WHERE channel_id = ? AND id = ?")

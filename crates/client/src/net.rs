@@ -498,6 +498,8 @@ pub enum Update {
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
+    /// The server asked to slow down: a message to this channel waits (`true`) or went.
+    SlowDown(Url, Id, bool),
     /// A channel's shared files, newest first; empty when loading them failed.
     SharedFiles(Url, Id, Vec<rusttalk_core::client::SharedFile>),
     /// How far saving a stored file got (0 to 1), by blob ID.
@@ -2238,14 +2240,15 @@ fn report(ctx: &Ctx, error: anyhow::Error) {
         ctx.send(Update::Failed(text));
         return;
     }
-    // Such as starting too many new DMs in an hour.
-    let busy = (error.downcast_ref::<reqwest::Error>())
-        .is_some_and(|error| error.status() == Some(StatusCode::TOO_MANY_REQUESTS));
+    // Rate limits, and starting too many new DMs in an hour.
+    let limited = error.is::<rusttalk_core::client::RateLimited>()
+        || (error.downcast_ref::<reqwest::Error>())
+            .is_some_and(|error| error.status() == Some(StatusCode::TOO_MANY_REQUESTS));
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
-        _ if busy => t!("net.slow_down"),
+        _ if limited => t!("net.slow_down"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));

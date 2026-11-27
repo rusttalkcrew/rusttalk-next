@@ -1004,6 +1004,8 @@ pub struct Chat {
     pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
     pub uploading: Option<(String, f32)>,
+    /// The server asked to slow down and a message here waits to go again.
+    pub slow_down: bool,
     /// The channel's shared files, newest first; `None` until loaded.
     pub shared: Option<Vec<rusttalk_core::client::SharedFile>>,
     /// Whether the shared files were asked for since the files view opened.

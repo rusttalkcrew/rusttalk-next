@@ -9,6 +9,7 @@ mod files;
 mod history;
 mod index;
 mod keys;
+mod limits;
 mod members;
 mod messages;
 mod metadata;
@@ -76,6 +77,7 @@ struct App {
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
+    limits: Arc<limits::Limits>,
     session_ttl: i64,
     dm_starts: Arc<dms::Starts>,
 }
@@ -193,7 +195,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
             tracing::error!(reason = self.code, error = self.detail, "request failed");
-        } else {
+        } else if self.retry_after.is_none() {
+            // Rate limits log once a minute per person themselves, not every refusal.
             tracing::warn!(reason = self.code, "request rejected");
         }
         match self.retry_after {
@@ -264,9 +267,11 @@ async fn run() -> Result<()> {
             history::init()?;
             let files = Arc::new(files::Files::open(&dir, &db).await?);
             let emoji = Arc::new(emoji::Emoji::open(&dir, &db).await?);
+            let limits = Arc::new(limits::Limits::open(&mut *db.acquire().await?).await?);
             serve(App {
                 files,
                 emoji,
+                limits,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(CHANGE_BACKLOG).0,
@@ -338,6 +343,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/files",
             get(file_settings::get).put(file_settings::set),
+        )
+        .route(
+            "/v1/settings/rate-limits",
+            get(limits::get).put(limits::set),
         )
         .route(
             "/v1/settings/message-history",

@@ -241,8 +241,12 @@ impl KeyClient<'_> {
             "id": encode(&scope.id), "peer": encode(peer),
             "commitment": encode(&context.commitment), "envelope": envelope,
         }));
-        let response: Result<CreatedDm> =
-            async { Ok(request.send().await?.error_for_status()?.json().await?) }.await;
+        let response: Result<CreatedDm> = async {
+            Ok(super::RateLimited::check(request.send().await?)?
+                .json()
+                .await?)
+        }
+        .await;
         // The server had one already, or refused: that one isn't new, so it is pinned
         // as usual and re-keyed before use.
         if response
@@ -419,16 +423,17 @@ impl KeyClient<'_> {
             .json(&post)
             .send()
             .await?;
+        // Slow mode gets its own countdown; any other 429 is a rate limit to wait out.
+        if let Some(limited) = super::RateLimited::from_response(&response) {
+            if let Ok(wait) = response.json::<Wait>().await
+                && wait.error == "slow_mode"
+            {
+                return Err(SlowMode(wait.retry_after).into());
+            }
+            return Err(limited.into());
+        }
         if let Err(error) = response.error_for_status_ref() {
             let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                if let Ok(wait) = response.json::<Wait>().await
-                    && wait.error == "slow_mode"
-                {
-                    return Err(SlowMode(wait.retry_after).into());
-                }
-                return Err(error.into());
-            }
             if backfill_at.is_some() {
                 let body = response.json::<serde_json::Value>().await.ok();
                 let code = body.as_ref().and_then(|v| v["error"].as_str());
@@ -509,13 +514,14 @@ impl KeyClient<'_> {
                 .await?;
             // Another client or retention may already have removed the edit.
             if reply.status() != StatusCode::NOT_FOUND {
-                reply.error_for_status()?;
+                super::RateLimited::check(reply)?;
             }
         }
-        self.request(Method::DELETE, &record_path(channel, id))
-            .send()
-            .await?
-            .error_for_status()?;
+        super::RateLimited::check(
+            self.request(Method::DELETE, &record_path(channel, id))
+                .send()
+                .await?,
+        )?;
         Ok(())
     }
 
