@@ -470,7 +470,8 @@ mod tests {
             let retry = response.headers()[RETRY_AFTER].to_str()?.to_owned();
             let status = response.status().as_u16();
             let body = axum::body::to_bytes(response.into_body(), 1024).await?;
-            assert_eq!(body, Bytes::from_static(br#"{"error":"rate_limited"}"#));
+            let expected = format!(r#"{{"error":"rate_limited","retry_after":{retry}}}"#);
+            assert_eq!(body, Bytes::from(expected));
             return Ok(Some((n + 1, status, retry)));
         }
         Ok(None)
