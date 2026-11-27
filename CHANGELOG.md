@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Server settings > Statistics shows owners and admins who is connected, sign-ins, messages, traffic, storage, uptime and memory, refreshed every 2 seconds. Only counts and sizes, no content.
+- Server statistics also show who is in voice, audio and video streams, and traffic split into voice and video and the rest.
 - On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.
 - Camera pictures look smooth instead of grainy in small tiles: they are scaled down by averaging, like the system's own camera preview.
 - Show the whole call full screen at any time with the new button at the top right of the call.

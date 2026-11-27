@@ -1,6 +1,9 @@
 # Production LiveKit config. Compose supplies the key (LIVEKIT_KEYS), the
 # advertised IP (NODE_IP) and the media ports from deploy/.env.
 port: 7880
+# Media byte counters for server statistics, read by the API on the stack network only;
+# Compose publishes no port for it.
+prometheus_port: 6789
 rtc:
   tcp_port: 7881
   udp_port: 7882

@@ -39,6 +39,7 @@ use crate::{
 
 mod enforcer;
 pub mod moderation;
+mod usage;
 
 pub use enforcer::{enforce, enforce_person, start as start_enforcer};
 
@@ -72,6 +73,8 @@ pub struct LiveKit {
     fetching: Mutex<HashMap<String, Fetching>>,
     /// Access checks waiting for the enforcement worker.
     queue: enforcer::Queue,
+    /// The last look at what LiveKit carries, for server statistics.
+    usage: tokio::sync::Mutex<usage::Usage>,
 }
 
 /// Removes a finished or dropped fetch, unless a change already replaced it.
@@ -121,6 +124,7 @@ impl LiveKit {
             rosters: Mutex::default(),
             fetching: Mutex::default(),
             queue: Default::default(),
+            usage: Default::default(),
         }))
     }
 
@@ -850,6 +854,7 @@ mod tests {
                 rosters: Mutex::default(),
                 fetching: Mutex::default(),
                 queue: Default::default(),
+                usage: Default::default(),
             })),
             session_ttl: 3600,
             dm_starts: Default::default(),
@@ -956,6 +961,7 @@ mod tests {
             rosters: Mutex::default(),
             fetching: Mutex::default(),
             queue: Default::default(),
+            usage: Default::default(),
         }
     }
 

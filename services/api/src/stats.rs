@@ -199,6 +199,10 @@ pub async fn show(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     let stats = &app.stats;
     let (received_per_sec, sent_per_sec) = *stats.rate.lock().expect("stats rate");
     let (count, at) = *stats.peak.lock().expect("stats peak");
+    let (voice, media) = match &app.voice {
+        Some(livekit) => livekit.usage().await,
+        None => (None, None),
+    };
     let wal = match &stats.wal {
         Some(path) => file_size(path).await,
         None => 0,
@@ -219,12 +223,14 @@ pub async fn show(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
                 received_per_sec,
                 sent_per_sec,
             },
+            media,
         },
         storage: StatsStorage {
             database: u64::try_from(pages).unwrap_or(0) + wal,
             files: u64::try_from(files).unwrap_or(0),
         },
         memory: memory().await,
+        voice,
     }))
 }
 
@@ -321,7 +327,8 @@ mod tests {
                 "storage",
                 "traffic",
                 "uptime_secs",
-                "version"
+                "version",
+                "voice"
             ]
         );
         Ok(())
