@@ -85,6 +85,8 @@ pub struct Stage {
     presenting: bool,
     /// Covers the whole window.
     pub full: Option<Tile>,
+    /// The whole call view covers the window, tiles and all.
+    pub whole: bool,
     /// When full screen shows its controls.
     chrome: Chrome,
 }
@@ -647,10 +649,22 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
 
     let mut acts = Vec::new();
-    // The toolbar, top right.
+    // Escape leaves the whole view full screen, after any menu or dialog over it.
+    let covered = Popup::is_any_open(&ctx) || ctx.memory(|m| m.top_modal_layer().is_some());
+    if stage.whole
+        && !covered
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        stage.whole = false;
+    }
+    // The toolbar, top right; full screen only while in this call.
+    let tools = if joined { 3.0 } else { 2.0 };
     let bar = Rect::from_min_size(
-        pos2(rect.right() - GAP - 2.0 * TOOL.x - 4.0, rect.top() + GAP),
-        vec2(2.0 * TOOL.x + 4.0, TOOL.y),
+        pos2(
+            rect.right() - GAP - tools * (TOOL.x + 4.0) + 4.0,
+            rect.top() + GAP,
+        ),
+        vec2(tools * (TOOL.x + 4.0) - 4.0, TOOL.y),
     );
     ui.scope_builder(
         UiBuilder::new()
@@ -659,6 +673,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let on = Look::On(ui::accent(ui).base);
+            if joined {
+                let (tip, look) = if stage.whole {
+                    (t!("call.exit_full_screen"), on)
+                } else {
+                    (t!("call.full_screen"), Look::Plain)
+                };
+                if ui::icon_button(ui, "⛶", tip, look, TOOL).clicked() {
+                    stage.whole ^= true;
+                }
+            }
             let (tip, look) = if stage.presenting {
                 (t!("call.leave_presentation"), on)
             } else {

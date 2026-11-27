@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Show the whole call full screen at any time with the new button at the top right of the call.
+
 ## v0.11.0 - 2026-11-27
 
 - Zoom pictures in the viewer with the scroll wheel.
