@@ -431,6 +431,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         server.dir.members = vec![member(ME, "Alex"), member(ANN, "Ann")].into();
         server.dir.dms = vec![crate::server::Dm {

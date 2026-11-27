@@ -129,6 +129,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
 | DELETE `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, lifts the mute |
+| PUT `/v1/members/{person}/timeout` | `{seconds, reason_ct?}` | `timeout_members` and a strictly higher rank, as for a kick. 204. `seconds` is one of 60, 300, 600, 3600, 86400 or 604800 (otherwise `400 invalid_timeout`); a new timeout replaces a running one. `reason_ct` is optional space-key metadata (`TimeoutReason`, the member's person ID as metadata ID). Until it ends the member gets `403 timed_out` when posting a message (also reactions, edits, forum posts, files and live files) in any non-DM channel, creating an invite or asking for a voice token, and LiveKit lets them publish nothing in rooms they are already in. DMs stay open. Stored with its end, so restarts and leaving don't end it. Sends `member_changed` with the profile's `timeout_until`; `GET /v1/members` lists it too, and `GET /v1/me` adds `timeout_until` and `timeout_reason_ct` for the member only. Audited as `member_timed_out` with `{seconds, ends_at}`. The end itself sends nothing; clients compare it with their clock |
+| DELETE `/v1/members/{person}/timeout` | Empty | `timeout_members` and a strictly higher rank. 204, ends a running timeout early (`404 timeout_not_found` without one). Audited as `member_timeout_ended` |
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip, can_lift}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
 | DELETE `/v1/bans/{person}` | Empty | `ban` and may lift it (see below). 204 |
@@ -196,10 +198,11 @@ doesn’t send them while `new_member_until` is set. Older servers answer 404.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all seventeen flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all nineteen flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
-`create_events`, `manage_events`, `start_focus` and `bypass_slow_mode`. Upgrading also
-gives `bypass_slow_mode` to custom roles that have `delete_messages`. Member (0) has `suggest_events`
+`create_events`, `manage_events`, `start_focus`, `bypass_slow_mode` and `timeout_members`.
+Upgrading also gives `bypass_slow_mode` to custom roles that have `delete_messages`, and
+`timeout_members` to custom roles that have `kick`. Member (0) has `suggest_events`
 and `start_focus` and starts as the default. Every new role gets `start_focus`
 when its creator has it. The other flags are `invite`, `manage_roles`,
 `view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`,
@@ -300,10 +303,10 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_slow_mode`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `not_a_text_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_timeout`, `invalid_member_limit`, `invalid_slow_mode`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `not_a_text_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full`, `new_member_rules` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full`, `timed_out`, `new_member_rules` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `timeout_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout`, `body_timeout` (a change body must arrive within 30 s; file uploads have their own limits) |
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |

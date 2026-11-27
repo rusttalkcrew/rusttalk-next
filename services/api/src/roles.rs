@@ -47,9 +47,11 @@ pub enum Permission {
     BypassSlowMode = 65536,
     /// Skip the new member rules (see `new_members`).
     SkipNewMemberRules = 131072,
+    /// Stop a lower-ranked member from writing and talking for a while.
+    TimeoutMembers = 262144,
 }
 
-const PERMISSIONS: [Permission; 18] = [
+const PERMISSIONS: [Permission; 19] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -68,6 +70,7 @@ const PERMISSIONS: [Permission; 18] = [
     Permission::StartFocus,
     Permission::BypassSlowMode,
     Permission::SkipNewMemberRules,
+    Permission::TimeoutMembers,
 ];
 
 #[derive(FromRow)]

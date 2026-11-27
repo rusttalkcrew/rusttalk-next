@@ -21,7 +21,8 @@ use crate::{
     channels, history, keys, limits, page_files, payload,
     roles::{self, Permission},
     slow_mode,
-    store::audit,
+    store::{self, audit},
+    timeouts,
 };
 
 /// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys,
@@ -120,6 +121,9 @@ pub async fn require_writer(
     person: &[u8],
 ) -> ApiResult<()> {
     let kind = readable_kind(db, channel, person).await?;
+    if kind != "dm" {
+        timeouts::refuse(db, person).await?;
+    }
     if !can_write(db, channel, person, &kind).await? {
         return Err(ApiError::forbidden("channel_write_denied"));
     }
@@ -132,7 +136,16 @@ pub async fn can_write(
     person: &[u8],
     kind: &str,
 ) -> ApiResult<bool> {
-    Ok(kind == "dm" || channels::has_flag(db, channel, person, channels::WRITE).await?)
+    // A timeout leaves DMs open, so a timed-out member can still talk to a moderator.
+    if kind == "dm" {
+        return Ok(true);
+    }
+    Ok(
+        channels::has_flag(db, channel, person, channels::WRITE).await?
+            && timeouts::ends_at(db, person, store::now()?)
+                .await?
+                .is_none(),
+    )
 }
 
 pub async fn create(

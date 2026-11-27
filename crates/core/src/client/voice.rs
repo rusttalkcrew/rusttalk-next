@@ -175,6 +175,11 @@ const MUSIC_AUDIO_KBPS: u32 = 128;
 #[error("voice channel is full")]
 pub struct ChannelFull;
 
+/// The server refused a join because a moderator put this person in a timeout.
+#[derive(Debug, thiserror::Error)]
+#[error("in a timeout")]
+pub struct TimedOut;
+
 #[derive(Deserialize)]
 struct Problem {
     error: String,
@@ -303,13 +308,16 @@ impl KeyClient<'_> {
             .await?;
         // Other refusals stay a reqwest error, so call recovery still sees their status.
         if let Some(error) = response.error_for_status_ref().err() {
-            let full = response.status() == reqwest::StatusCode::FORBIDDEN
-                && (response.json::<Problem>().await)
-                    .is_ok_and(|problem| problem.error == "voice_channel_full");
-            return Err(if full {
-                ChannelFull.into()
-            } else {
-                error.into()
+            let code = match response.status() == reqwest::StatusCode::FORBIDDEN {
+                true => {
+                    (response.json::<Problem>().await).map_or_else(|_| String::new(), |p| p.error)
+                }
+                false => String::new(),
+            };
+            return Err(match code.as_str() {
+                "voice_channel_full" => ChannelFull.into(),
+                "timed_out" => TimedOut.into(),
+                _ => error.into(),
             });
         }
         let reply: Token = response.json().await?;

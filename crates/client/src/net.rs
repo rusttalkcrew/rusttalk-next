@@ -2244,10 +2244,12 @@ fn report(ctx: &Ctx, error: anyhow::Error) {
     let limited = error.is::<rusttalk_core::client::RateLimited>()
         || (error.downcast_ref::<reqwest::Error>())
             .is_some_and(|error| error.status() == Some(StatusCode::TOO_MANY_REQUESTS));
+    let timed_out = error.is::<rusttalk_core::client::voice::TimedOut>();
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if timed_out => t!("timeout.voice_refused"),
         _ if limited => t!("net.slow_down"),
         _ if error.is::<crate::home::new_members::Refused>() => t!("new_members.refused"),
         _ => t!("admin.failed"),

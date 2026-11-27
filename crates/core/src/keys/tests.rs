@@ -315,6 +315,7 @@ fn profile_and_part_notices_stay_readable_by_older_apps() {
             hide_offline: true,
             avatar_initialized: true,
             voice_muted: false,
+            timeout_until: None,
         })),
     };
     let part = Event::ChannelChanged {

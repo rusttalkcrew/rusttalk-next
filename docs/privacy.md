@@ -12,6 +12,7 @@ their expiry) are kept only in memory for at most 60 seconds.
 | Table | Columns |
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `avatar_initialized` (whether a picture was explicitly set or cleared), nullable `bio_ct` (the profile bio), `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
+| `timeouts` | `person_id`, `ends_at` (Unix seconds when a moderator's timeout ends, plain because the server enforces it), nullable `reason_ct` (the moderator's reason, space-key ciphertext returned only to that member) |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (fifteen-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits), `events_enabled` (whether Events is on), `new_member_secs` (how long the new member rules last after joining, 0 for off, plain because it is a setting) |
 | `member_roles` | `person_id`, `role_id` |

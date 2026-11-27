@@ -101,6 +101,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             },
             Member {
                 person: ANN,
@@ -112,6 +113,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             },
         ]
         .into();

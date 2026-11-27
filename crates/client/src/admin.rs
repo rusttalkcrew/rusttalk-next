@@ -14,6 +14,8 @@ mod members;
 
 mod roles;
 
+pub mod timeout;
+
 use chrono::{DateTime, Local};
 use eframe::egui::{self, CollapsingHeader, ComboBox, DragValue, RichText, Ui, accesskit::Role};
 
@@ -38,11 +40,12 @@ const ICON_SIZE: f32 = 80.0;
 const HEADER_ICON: f32 = 40.0;
 
 /// Audit log filters: API action and label.
-fn filters() -> [(&'static str, &'static str); 9] {
+fn filters() -> [(&'static str, &'static str); 10] {
     [
         ("member_banned", t!("audit.filter_bans")),
         ("member_unbanned", t!("audit.filter_unbans")),
         ("member_kicked", t!("audit.filter_kicks")),
+        ("member_timed_out", t!("audit.filter_timeouts")),
         ("left", t!("audit.filter_leaves")),
         ("member_roles_changed", t!("audit.filter_roles")),
         ("joined", t!("audit.filter_joins")),
@@ -402,14 +405,25 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
 #[derive(Clone, Copy)]
 pub enum Moderate {
     Roles,
+    Timeout,
+    EndTimeout,
     Kick,
     Ban,
 }
 
-/// Menu items to kick, ban or change the roles of someone else, as allowed.
-pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms) {
+/// Menu items to change the roles of, time out, kick or ban someone else, as allowed.
+/// `timed_out`: they are in a timeout now, so it can be ended instead.
+pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms, timed_out: bool) {
     if perms.manage_roles && m.item("🏷", t!("admin.change_roles")).clicked() {
         *choice = Some(Moderate::Roles);
+    }
+    if perms.timeout_members {
+        if !timed_out && m.item("⏳", t!("timeout.menu")).clicked() {
+            *choice = Some(Moderate::Timeout);
+        }
+        if timed_out && m.item("⌛", t!("timeout.end")).clicked() {
+            *choice = Some(Moderate::EndTimeout);
+        }
     }
     if perms.kick && m.add(Item::new("👢", t!("admin.kick")).danger()).clicked() {
         *choice = Some(Moderate::Kick);
@@ -421,6 +435,13 @@ pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms
 
 /// Ask before kicking, or open settings for a ban or role change.
 pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
+    match choice {
+        Moderate::Timeout => return timeout::open(home, index, person),
+        Moderate::EndTimeout => {
+            return home.servers[index].send(Command::Admin(Admin::EndTimeout(person)));
+        }
+        _ => {}
+    }
     if matches!(choice, Moderate::Kick) {
         if home.kick.is_none() {
             let server = &home.servers[index];
@@ -520,7 +541,9 @@ fn action(server: &Server, person: &Id, choice: Moderate) -> MemberAction {
                 .map(|m| m.roles.clone())
                 .unwrap_or_default(),
         ),
-        Moderate::Kick => unreachable!("Kick has its own confirmation"),
+        Moderate::Kick | Moderate::Timeout | Moderate::EndTimeout => {
+            unreachable!("handled in `moderate`")
+        }
         Moderate::Ban => MemberAction::Ban { network: false },
     }
 }
@@ -1241,6 +1264,22 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_unbanned" => t!("audit.member_unbanned", actor = actor, target = target),
         "member_kicked" => t!("audit.member_kicked", actor = actor, target = target),
         "voice_muted" => t!("audit.voice_muted", actor = actor, target = target),
+        "member_timed_out" => match entry.details["seconds"].as_i64() {
+            Some(seconds) => t!(
+                "audit.member_timed_out",
+                actor = actor,
+                target = target,
+                length = timeout::label(seconds)
+            ),
+            None => t!(
+                "audit.member_timed_out_plain",
+                actor = actor,
+                target = target
+            ),
+        },
+        "member_timeout_ended" => {
+            t!("audit.member_timeout_ended", actor = actor, target = target)
+        }
         "voice_unmuted" => t!("audit.voice_unmuted", actor = actor, target = target),
         "voice_removed" => t!("audit.voice_removed", actor = actor, target = target),
         "voice_moved" => t!("audit.voice_moved", actor = actor, target = target),

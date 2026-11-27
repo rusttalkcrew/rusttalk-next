@@ -391,6 +391,7 @@ impl Listing {
                     roles: vec![],
                     bio: None,
                     voice_muted: false,
+                    timeout_until: None,
                 })
                 .collect(),
             dms: self

@@ -106,6 +106,11 @@ pub struct Me {
     /// While the new member rules apply to this member: when they end, in unix seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     new_member_until: Option<i64>,
+    /// While in a timeout: when it ends, and the moderator's reason as ciphertext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_reason_ct: Option<String>,
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
@@ -123,7 +128,9 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
     let status = crate::presence::stored(&mut tx, &actor.person).await?;
     let status = crate::presence::status_for(status, crate::presence::knows_dnd(&headers));
     let new_member_until = crate::new_members::until(&mut tx, &actor.person, actor.at).await?;
+    let timeout = crate::timeouts::own(&mut tx, &actor.person, actor.at).await?;
     tx.commit().await?;
+    let (timeout_until, reason) = timeout.unzip();
     Ok(Json(Me {
         person_id: encode(&actor.person),
         device_id: encode(&actor.device),
@@ -132,6 +139,8 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         status,
         hide_offline,
         new_member_until,
+        timeout_until,
+        timeout_reason_ct: metadata::encoded(reason.flatten()),
     }))
 }
 
@@ -170,6 +179,7 @@ pub async fn invite(
         .await?
         .require(Permission::Invite)?;
     app.limits.check(&actor, crate::limits::Action::Invite)?;
+    crate::timeouts::refuse(&mut tx, &actor.person).await?;
     crate::new_members::check(&mut tx, &actor).await?;
     let expires_at = actor.at + ttl_seconds;
     query("DELETE FROM invites WHERE expires_at <= ?")

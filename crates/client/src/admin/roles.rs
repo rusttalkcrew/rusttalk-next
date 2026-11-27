@@ -826,12 +826,21 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
     // role, which keeps every permission.
     let knows =
         |name: &str| (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == name));
-    let groups = groups(
+    let mut groups = groups(
         dir.calendar.is_some(),
         knows("start_focus"),
         knows("bypass_slow_mode"),
         knows("skip_new_member_rules"),
     );
+    // Likewise for timeouts, which older servers refuse.
+    if knows("timeout_members") {
+        groups[2].1.push((
+            "timeout_members",
+            t!("perm.timeout_members"),
+            t!("perm.timeout_members_help"),
+            false,
+        ));
+    }
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);
@@ -1171,6 +1180,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         let (ann, bob) = ([1; 32], [2; 32]);
         let dir = Directory {
