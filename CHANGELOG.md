@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.
+- On a computer, opening a channel or DM puts the cursor in the message box so you can type straight away.
 
 ## v0.9.1 - 2026-11-26
 
