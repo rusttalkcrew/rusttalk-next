@@ -6,7 +6,9 @@ use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use reqwest::{Body, Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{KeyClient, MessageBody, MessageRecord, Server, decode_thumbnail, prepare_file},
+    client::{
+        KeyClient, MessageBody, MessageRecord, RateLimited, Server, decode_thumbnail, prepare_file,
+    },
     keys::random_key,
 };
 use serde_json::json;
@@ -406,8 +408,16 @@ pub(super) async fn share(client: &KeyClient<'_>, channel: &[u8; 32]) -> Result<
     client
         .upload_prepared(channel, &file, b"shared", None, None)
         .await?;
-    client.share_file(channel, &file).await?;
-    Ok(file.file.id)
+    // Waiting as asked, like the app: hundreds in a row reach the session's ceiling.
+    loop {
+        match client.share_file(channel, &file).await {
+            Err(error) => match error.downcast_ref::<RateLimited>() {
+                Some(RateLimited(wait)) => tokio::time::sleep(*wait).await,
+                None => return Err(error),
+            },
+            Ok(()) => return Ok(file.file.id),
+        }
+    }
 }
 
 /// The channel's shared-file records as the API lists them, before any app-side checks.

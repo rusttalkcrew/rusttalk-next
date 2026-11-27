@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Zoom pictures in the viewer with the scroll wheel.
+- Adding many files to a channel's shared files at once no longer fails when the server asks you to slow down: the app waits a moment and carries on.
 
 ## v0.10.0 - 2026-11-27
 

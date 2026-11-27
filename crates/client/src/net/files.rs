@@ -979,7 +979,16 @@ pub(super) async fn stored(
 
 /// Add an uploaded file to the channel's shared files, or remove it again.
 async fn share_stored(client: &mut KeyClient<'_>, channel: Id, file: &Attachment) -> Result<()> {
-    let mut shared = client.share_file(&channel, file).await;
+    // Asked to slow down: wait as for a message, rather than throw the upload away.
+    let mut pacing = Pacing::default();
+    let mut shared = loop {
+        let shared = client.share_file(&channel, file).await;
+        let Some(wait) = pacing.wait(&shared) else {
+            break shared;
+        };
+        tracing::info!(?wait, "sharing a file rate limited; trying again shortly");
+        tokio::time::sleep(wait).await;
+    };
     // The channel just got a new key: take it and try once more.
     if code(shared.as_ref().err()) == Some("epoch_changed") && client.sync().await.is_ok() {
         shared = client.share_file(&channel, file).await;
@@ -1086,6 +1095,9 @@ fn upload_problem(error: &anyhow::Error) -> String {
     }
     if error.downcast_ref::<MessageError>() == Some(&MessageError::ServerUpdateRequired) {
         return t!("net.rotation_update").into();
+    }
+    if error.is::<RateLimited>() {
+        return t!("net.slow_down").into();
     }
     match (status(error), code(Some(error))) {
         (_, Some("shared_limit")) => t!("files.err_shared_limit"),
@@ -1616,6 +1628,12 @@ mod tests {
                 "file_upload_busy"
             )),
             "Too many uploads right now. Try again in a moment."
+        );
+        // Still asked to slow down after waiting a few times, such as when sharing files.
+        let limited = anyhow::Error::from(RateLimited(Duration::from_secs(1)));
+        assert_eq!(
+            upload_problem(&limited),
+            "Slow down a little, then try again."
         );
     }
 }
