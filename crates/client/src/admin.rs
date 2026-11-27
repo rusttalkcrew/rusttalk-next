@@ -178,6 +178,7 @@ impl Settings {
             AdminUpdate::RateLimits(saved) => match &mut self.rate_limits {
                 Some(form) if form.unsaved() => form.saved(saved),
                 limits => *limits = Some(rate_limits::Form::new(saved)),
+            },
             AdminUpdate::NewMembers(saved) => match &mut self.new_members {
                 Some(form) if form.unsaved() => form.saved(saved),
                 rules => *rules = Some(new_members::Form::new(saved)),
@@ -359,6 +360,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     }
     if tab == Tab::RateLimits {
         server.send(Command::Admin(Admin::LoadRateLimits));
+    }
     if tab == Tab::NewMembers {
         server.send(Command::Admin(Admin::LoadNewMembers));
     }
@@ -659,6 +661,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         if let Some(form) = &mut settings.rate_limits {
                             form.show(ui, perms.manage_server)
                                 .map(Admin::SaveRateLimits)
+                        } else {
+                            loading(ui, settings);
+                            None
+                        }
+                    }
                     Tab::NewMembers => {
                         if let Some(form) = &mut settings.new_members {
                             form.show(ui).map(Admin::SaveNewMembers)

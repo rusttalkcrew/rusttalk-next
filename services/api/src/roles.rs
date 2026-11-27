@@ -49,7 +49,7 @@ pub enum Permission {
     SkipNewMemberRules = 131072,
 }
 
-const PERMISSIONS: [Permission; 17] = [
+const PERMISSIONS: [Permission; 18] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,

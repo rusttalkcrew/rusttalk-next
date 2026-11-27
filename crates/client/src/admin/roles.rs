@@ -326,6 +326,9 @@ fn groups(
             "bypass_slow_mode",
             t!("perm.bypass_slow_mode"),
             t!("perm.bypass_slow_mode_help"),
+            false,
+        ));
+    }
     if new_members {
         groups[2].1.push((
             "skip_new_member_rules",
