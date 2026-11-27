@@ -117,6 +117,7 @@ pub mod layout;
 mod markdown;
 pub mod mentions;
 pub(crate) mod new_members;
+pub(crate) mod nsfw;
 pub mod person;
 mod pokes;
 pub mod polls;
@@ -143,6 +144,8 @@ pub struct Home {
     friends_tab: friends::Tab,
     /// Pokes received and sent; kept on this device only.
     pokes: crate::pokes::Pokes,
+    /// NSFW channels this device agreed to see; kept on this device only.
+    nsfw_agreed: nsfw::Agreed,
     /// The pop-up for the newest poke.
     popup: Option<pokes::Popup>,
     /// Requests to join a voice channel that ring here, and this person's own.
@@ -243,6 +246,31 @@ struct Find {
     error: Option<String>,
     /// Just opened: list servers without waiting for a click.
     opened: bool,
+    /// The "Report server" dialog, while open.
+    report: Option<Report>,
+    /// A report went through.
+    reported: bool,
+}
+
+/// A report on a listed server, being written.
+struct Report {
+    listed: Listed,
+    reason: Option<crate::net::ReportReason>,
+    note: String,
+    sending: bool,
+    error: Option<String>,
+}
+
+impl Report {
+    fn new(listed: Listed) -> Self {
+        Self {
+            listed,
+            reason: None,
+            note: String::new(),
+            sending: false,
+            error: None,
+        }
+    }
 }
 
 impl Find {
@@ -306,6 +334,8 @@ enum Dialog {
         limit: Option<(u32, bool)>,
         /// Text and forum channels only: slow mode seconds (0 for off), and whether changed.
         slow: Option<(u32, bool)>,
+        /// Text, forum and page channels only: marked NSFW, and whether changed.
+        nsfw: Option<(bool, bool)>,
         /// Role flags changed on the Permissions tab, sent with Save.
         flags: Vec<(String, u8)>,
     },
@@ -322,6 +352,8 @@ enum Dialog {
     Leave(usize, Option<String>),
     /// Poke someone, with a short note.
     Poke(Id, String),
+    /// The owner removes a message for a legal reason: server, channel, message.
+    TakeDown(usize, Id, Id, Box<crate::admin::takedown::Form>),
 }
 
 pub(crate) enum ChannelEdit {
@@ -438,6 +470,7 @@ impl Home {
             friends,
             friends_tab: friends::Tab::default(),
             pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
+            nsfw_agreed: nsfw::Agreed::open(data_dir.join("nsfw_agreed.json")),
             popup: None,
             requests: Default::default(),
             dm_deleted,
@@ -913,7 +946,9 @@ impl Home {
             return Vec::new();
         }
         match self.view {
+            // Behind the NSFW warning nothing is read yet.
             View::Server(index) => (self.servers[index].open)
+                .filter(|channel| !self.nsfw_warns(index, channel))
                 .map(|channel| (index, channel))
                 .into_iter()
                 .collect(),
@@ -1191,6 +1226,7 @@ impl Home {
                     limit: channel.voice.then_some((channel.member_limit, false)),
                     slow: (!channel.voice && !channel.page)
                         .then_some((channel.slow_mode_secs, false)),
+                    nsfw: (!channel.voice).then_some((channel.nsfw, false)),
                     flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
@@ -1311,6 +1347,18 @@ impl Home {
                     Err(error) => find.error = Some(error),
                 }
             }
+            Update::Reported(sent) => match sent {
+                Ok(()) => {
+                    self.find.report = None;
+                    self.find.reported = true;
+                }
+                Err(error) => {
+                    if let Some(report) = &mut self.find.report {
+                        report.sending = false;
+                        report.error = Some(error);
+                    }
+                }
+            },
             Update::Listed(checked) => {
                 self.find.checking = false;
                 match checked {
@@ -2108,6 +2156,7 @@ impl Home {
                     chat.open_draft(&server.dir, &draft.text);
                     chat.reply_to = draft.reply_to;
                     chat.editing = draft.edit_of;
+                    chat.mark_sensitive = draft.sensitive;
                     files::stage(chat, draft.files, max);
                 }
             }
@@ -2200,6 +2249,9 @@ pub fn show(
     let settings = home.voice.audio.snapshot();
     ui::apply(ui.ctx(), settings.appearance());
     emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
+    if home.files.sensitive.prefs != settings.sensitive {
+        home.files.sensitive.prefs = settings.sensitive.clone();
+    }
     crate::i18n::set(&settings.language);
     crate::i18n::set_clock(&settings.clock);
     if welcome::show(ui, home) {
@@ -3323,7 +3375,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         (true, true) => call::JOIN_SLOT + call::COUNT_SLOT,
                         (true, false) => call::JOIN_SLOT,
                         _ => 0.0,
-                    } + if focus { focus::badge_room(ui) } else { 0.0 };
+                    } + if focus { focus::badge_room(ui) } else { 0.0 }
+                        + if channel.nsfw {
+                            nsfw::badge_room(ui)
+                        } else {
+                            0.0
+                        };
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
@@ -3335,6 +3392,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let lock = if locked { ui::NAV_LOCK_WIDTH } else { 0.0 };
                     if focus {
                         focus::badge(ui, row.rect, &channel.name, selected, trailing + lock);
+                    }
+                    if channel.nsfw {
+                        nsfw::row_badge(ui, row.rect, &channel.name, selected, trailing + lock);
                     }
                     let chats = [(&server.address, channel.id)];
                     let marks = row.rect.with_max_x(row.rect.right() - trailing - lock);
@@ -4144,6 +4204,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
             server.send(Command::SetHideOffline(hide));
         }
     }
+    sensitive_media(ui, &mut settings.sensitive);
     ui::page_section(ui, t!("previews.section"));
     for provider in previews::PROVIDERS {
         let mut on = settings.link_previews.get(provider.id()) == Some(&true);
@@ -4208,6 +4269,44 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
     crate::key_storage::settings(ui, &mut home.key_storage, keystore, &home.identity);
 }
 
+/// "Sensitive media": what shows blurred until tapped. Showing everything turns the
+/// others off; a picture blurred from its own menu stays blurred.
+fn sensitive_media(ui: &mut Ui, prefs: &mut crate::sensitive::Prefs) {
+    ui::page_section(ui, t!("sensitive.section"));
+    let all = prefs.show_all;
+    ui.add_enabled_ui(!all, |ui| {
+        let rows = [
+            (
+                &mut prefs.blur_marked,
+                t!("sensitive.blur_marked"),
+                t!("sensitive.blur_marked_help"),
+            ),
+            (
+                &mut prefs.detect,
+                t!("sensitive.detect"),
+                t!("sensitive.detect_help"),
+            ),
+            (
+                &mut prefs.nsfw_unblurred,
+                t!("sensitive.nsfw"),
+                t!("sensitive.nsfw_help"),
+            ),
+        ];
+        for (on, label, help) in rows {
+            let mut shown = *on && !all;
+            if ui::toggle_row(ui, &mut shown, label, help).changed() {
+                *on = shown;
+            }
+        }
+    });
+    ui::toggle_row(
+        ui,
+        &mut prefs.show_all,
+        t!("sensitive.show_all"),
+        t!("sensitive.show_all_help"),
+    );
+}
+
 /// The configured directory and its optional certificate pin, or the official one.
 fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fingerprint>), String> {
     let url = settings.index_url.trim();
@@ -4248,6 +4347,9 @@ fn find(ui: &mut Ui, home: &mut Home) {
             }
         });
         error_text(ui, find.error.as_deref());
+        if find.reported {
+            ui.weak(t!("find.report_sent"));
+        }
         if find.error.is_some()
             && !find.searching
             && ui::secondary(ui, t!("common.try_again")).clicked()
@@ -4260,6 +4362,7 @@ fn find(ui: &mut Ui, home: &mut Home) {
             ui.weak(t!("home.no_servers_found"));
         }
         let mut pick = None;
+        let mut reporting = None;
         ScrollArea::vertical().show(ui, |ui| {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 for listed in &find.results {
@@ -4296,7 +4399,25 @@ fn find(ui: &mut Ui, home: &mut Home) {
                         if !listed.description.is_empty() {
                             ui.add(Label::new(&listed.description).wrap());
                         }
-                        ui.label(ui::caption(t!("home.members", count = listed.members)));
+                        ui::trailing_row(
+                            ui,
+                            |ui| {
+                                let report = ui::secondary(ui, t!("find.report"));
+                                report.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        Role::Button,
+                                        true,
+                                        t!("find.report_named", server = listed.name),
+                                    )
+                                });
+                                if report.clicked() {
+                                    reporting = Some(listed.clone());
+                                }
+                            },
+                            |ui| {
+                                ui.label(ui::caption(t!("home.members", count = listed.members)));
+                            },
+                        );
                     });
                 }
                 if find.more
@@ -4307,6 +4428,26 @@ fn find(ui: &mut Ui, home: &mut Home) {
                 }
             });
         });
+        if let Some(listed) = reporting {
+            find.report = Some(Report::new(listed));
+            find.reported = false;
+        }
+        if let Some((reason, note)) = report_dialog(ui.ctx(), find) {
+            match directory(&settings) {
+                Ok((url, pin)) => {
+                    let report = find.report.as_mut().expect("dialog open");
+                    report.sending = true;
+                    report.error = None;
+                    let server = report.listed.server.server_id;
+                    home.net.report_listed(url, pin, server, reason, note);
+                }
+                Err(problem) => {
+                    if let Some(report) = &mut find.report {
+                        report.error = Some(problem);
+                    }
+                }
+            }
+        }
         if let Some(listed) = pick {
             find.checking = true;
             find.error = None;
@@ -4331,6 +4472,89 @@ fn find(ui: &mut Ui, home: &mut Home) {
             }
         }
     });
+}
+
+/// The "Report server" dialog: a reason, an optional note; what to send, once sent.
+fn report_dialog(
+    ctx: &egui::Context,
+    find: &mut Find,
+) -> Option<(crate::net::ReportReason, String)> {
+    let report = find.report.as_mut()?;
+    let title = t!("find.report_title", server = report.listed.name);
+    let mut send = None;
+    let mut close = false;
+    let ((), dismissed) = ui::dialog(ctx, "report-server", &title, |ui| {
+        ui.add(Label::new(t!("find.report_help")).wrap());
+        ui.hyperlink_to(t!("admin.directory_rules"), official::DIRECTORY_RULES);
+        ui.add_space(ui::SPACE_S);
+        // Two side by side where they fit, so the dialog fits a short window.
+        let room = ui.available_width();
+        let width = if room >= 2.0 * 200.0 + ui::SPACE_S {
+            (room - ui::SPACE_S) / 2.0
+        } else {
+            room
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(ui::SPACE_S);
+            reason_cards(ui, width, &mut report.reason);
+        });
+        ui.add_space(ui::SPACE_S);
+        let label = ui.label(ui::bold(t!("find.report_note")));
+        ui.add(
+            ui::text_area(&mut report.note)
+                .desired_rows(3)
+                .char_limit(500)
+                .hint_text(t!("find.report_note_hint"))
+                .desired_width(f32::INFINITY),
+        )
+        .labelled_by(label.id);
+        ui::error_text(ui, report.error.as_deref());
+        ui::footer(ui, |ui| {
+            let ready = report.reason.is_some() && !report.sending;
+            let sent = ui
+                .add_enabled_ui(ready, |ui| ui::primary(ui, t!("find.report_send")))
+                .inner
+                .clicked();
+            if let Some(reason) = report.reason.filter(|_| sent) {
+                send = Some((reason, report.note.clone()));
+            }
+            close = ui::secondary(ui, t!("common.cancel")).clicked();
+            if report.sending {
+                ui.spinner();
+            }
+        });
+    });
+    if close || dismissed {
+        find.report = None;
+        return None;
+    }
+    send
+}
+
+/// The reasons to report a listed server, as pick-one cards.
+fn reason_cards(ui: &mut Ui, width: f32, picked: &mut Option<crate::net::ReportReason>) {
+    use crate::net::ReportReason;
+    for reason in ReportReason::ALL {
+        let (icon, title, help) = match reason {
+            ReportReason::Spam => ("🗑", t!("find.reason_spam"), t!("find.reason_spam_help")),
+            ReportReason::Scam => ("🔒", t!("find.reason_scam"), t!("find.reason_scam_help")),
+            ReportReason::Harassment => (
+                "🚫",
+                t!("find.reason_harassment"),
+                t!("find.reason_harassment_help"),
+            ),
+            ReportReason::Illegal => (
+                "⚠",
+                t!("find.reason_illegal"),
+                t!("find.reason_illegal_help"),
+            ),
+            ReportReason::Other => ("❓", t!("find.reason_other"), t!("find.reason_other_help")),
+        };
+        let selected = *picked == Some(reason);
+        if ui::choice_card_sized(ui, width, selected, icon, title, help).clicked() {
+            *picked = Some(reason);
+        }
+    }
 }
 
 pub(crate) fn new_server(
@@ -4612,6 +4836,11 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         home.servers[index].open = None;
         return;
     }
+    // Nothing is loaded or shown until this device continues past the warning.
+    if home.nsfw_warns(index, &channel) {
+        nsfw::warning(ui, home, index, channel);
+        return;
+    }
     let server = &mut home.servers[index];
     let mut chat = server.chats.remove(&channel).unwrap_or_default();
     // A membership notice can arrive before anyone has opened this channel.
@@ -4621,6 +4850,8 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
     }
     let kind = home.servers[index].channel(&channel).map(ChannelKind::of);
+    // Only while this channel draws; DMs and other screens never count as one.
+    home.files.sensitive.nsfw_here = crate::sensitive::agreed_nsfw(home, index, &channel);
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
     } else if gallery::shown(ui.ctx(), channel) {
@@ -4641,6 +4872,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             }
         }
     }
+    home.files.sensitive.nsfw_here = false;
     home.servers[index].chats.insert(channel, chat);
 }
 
@@ -4684,9 +4916,15 @@ fn channel_title(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         let title = server
             .channel(&channel)
             .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
+        let nsfw = server.is_nsfw(&channel);
         let in_server = matches!(home.view, View::Server(_));
         let layout = in_server.then_some(&mut home.layout);
-        pane_title(ui, "chat-title", &title, layout, Some(channel));
+        pane_title_with(ui, "chat-title", &title, Some(channel), |ui| {
+            if let Some(layout) = layout {
+                layout::members_button(ui, layout);
+            }
+            nsfw::header_badge(ui, nsfw);
+        });
     }
 }
 
@@ -4782,13 +5020,14 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
     let can_edit = server.can_write(&channel) && !server.dir.perms.preview;
     let online = server.status == Status::Online;
-    pane_title(
-        ui,
-        "chat-title",
-        &title,
-        in_server.then_some(&mut home.layout),
-        Some(channel),
-    );
+    let nsfw = server.is_nsfw(&channel);
+    let members = in_server.then_some(&mut home.layout);
+    pane_title_with(ui, "chat-title", &title, Some(channel), |ui| {
+        if let Some(layout) = members {
+            layout::members_button(ui, layout);
+        }
+        nsfw::header_badge(ui, nsfw);
+    });
     toast_line(ui, &mut home.toast);
     let Home {
         servers,
@@ -4990,6 +5229,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     edit_of: None,
                     revision: 0,
                     files: chat.staged.drain(..).map(|file| file.path).collect(),
+                    sensitive: std::mem::take(&mut chat.mark_sensitive),
                     keep,
                     sticker: None,
                     friend: None,
@@ -5211,12 +5451,17 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<fr
             At::Dm(_) => None,
         }
         .map_or(0, |channel| channel.slow_mode_secs);
+        let nsfw = match at {
+            At::Channel(index, channel) => servers[index].is_nsfw(&channel),
+            At::Dm(_) => false,
+        };
         let members = in_server.then_some(&mut *layout);
         pane_title_with(ui, "chat-title", &title, files, |ui| {
             if let Some(layout) = members {
                 layout::members_button(ui, layout);
             }
             slow_mode::header_icon(ui, slow);
+            nsfw::header_badge(ui, nsfw);
         });
     }
     let act = friends::dm_card(ui, relation, request, &name);
@@ -5669,6 +5914,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<fr
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
         }
+        Some(Pick::TakeDown(id)) => {
+            if let At::Channel(index, channel) = at {
+                *dialog = Some(Dialog::TakeDown(index, channel, id, Box::default()));
+            }
+        }
         Some(Pick::AddReaction(id)) => {
             chat.reacting = Some(id);
             emoji_picker.open_for_reaction(ui.ctx(), composer_id(key));
@@ -5760,6 +6010,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         edit_of: None,
         revision: 0,
         files: Vec::new(),
+        sensitive: false,
         keep: Vec::new(),
         sticker: None,
         friend: None,
@@ -5815,6 +6066,24 @@ fn send_dm(
 /// The stored files (and thumbnails) of message `id` that no other loaded message
 /// uses. Saving a page again sends its kept pictures' references, so deleting one
 /// version must leave the pictures another version still shows.
+/// What a takedown of message `id` removes: it, its edits, and every stored file and
+/// thumbnail it carries, also where someone else posted the same file again.
+fn takedown_ids(chat: &Chat, id: &Id) -> Vec<Id> {
+    let mut ids = vec![*id];
+    ids.extend(chat.revisions.get(id).into_iter().flatten());
+    let files = (chat.messages.iter())
+        .filter(|msg| msg.id == *id)
+        .flat_map(|msg| &msg.files);
+    for file in files {
+        for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
+            if !ids.contains(&blob.id) {
+                ids.push(blob.id);
+            }
+        }
+    }
+    ids
+}
+
 fn own_files(messages: &[Msg], id: &Id) -> Vec<Id> {
     let blobs = |msg: &Msg| -> Vec<Id> {
         (msg.files.iter())
@@ -5978,6 +6247,8 @@ enum Pick {
     JumpToReply(Id, Option<Id>),
     Edit(Id, String),
     Delete(Id),
+    /// The owner's "Remove content" for a legal reason.
+    TakeDown(Id),
     /// Join with, or open the server of, an invite link shown as a card.
     Invite(String),
     Profile(usize, Id, person::Pick),
@@ -6360,6 +6631,7 @@ fn composer(
             edit_of: None,
             revision: 0,
             files: Vec::new(),
+            sensitive: false,
             keep: Vec::new(),
             sticker: id,
             friend: None,
@@ -6420,10 +6692,11 @@ fn composer(
         tracing::warn!("no randomness for a message ID");
         return (None, attach);
     };
-    let files = if editing {
-        Vec::new()
+    let (files, sensitive) = if editing {
+        (Vec::new(), false)
     } else {
-        chat.staged.drain(..).map(|file| file.path).collect()
+        let files = chat.staged.drain(..).map(|file| file.path).collect();
+        (files, std::mem::take(&mut chat.mark_sensitive))
     };
     let edit_of = chat.editing.take();
     let now_ms = SystemTime::now()
@@ -6440,6 +6713,7 @@ fn composer(
         edit_of,
         revision: edit_of.map_or(0, |original| chat.next_revision(dir.me, original, now_ms)),
         files,
+        sensitive,
         keep: Vec::new(),
         sticker: None,
         friend: None,
@@ -6922,6 +7196,8 @@ fn message(
     let can_delete = live
         && (authored
             || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel)));
+    // The owner may have to remove anything in a channel, for a legal reason.
+    let can_take_down = live && dir.perms.owner && !dir.dms.iter().any(|dm| dm.channel == channel);
     let mut pick = invite;
     if let (Some(trigger), Some((index, profile))) = (&trigger, profile)
         && let Some(action) = person::profile(ui, trigger, &profile, false)
@@ -6992,11 +7268,14 @@ fn message(
         if m.item("🆔", t!("home.copy_message_id")).clicked() {
             m.ui().ctx().copy_text(hex::encode(msg.id));
         }
-        if can_delete {
+        if can_delete || can_take_down {
             m.separator();
-            if m.danger("🗑", t!("common.delete")).clicked() {
-                pick = Some(Pick::Delete(msg.id));
-            }
+        }
+        if can_delete && m.danger("🗑", t!("common.delete")).clicked() {
+            pick = Some(Pick::Delete(msg.id));
+        }
+        if can_take_down && m.danger("⚖", t!("takedown.menu")).clicked() {
+            pick = Some(Pick::TakeDown(msg.id));
         }
         pick
     };
@@ -7347,6 +7626,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::Member(index, person) => home.servers[*index].member_name(person),
         Dialog::Delete(..) | Dialog::DeleteDm(..) => t!("home.delete_message_title").into(),
         Dialog::Unshare(..) => t!("files.remove_title").into(),
+        Dialog::TakeDown(..) => t!("takedown.dialog_title").into(),
         Dialog::Leave(index, _) => t!("home.leave_title", server = home.servers[*index].name()),
         Dialog::Poke(person, _) => t!("pokes.poke_title", name = home.peer_name(person)),
     }
@@ -7507,6 +7787,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             audio,
             limit,
             slow,
+            nsfw,
             flags,
         } => {
             let data = &home.servers[*server];
@@ -7578,6 +7859,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     if let Some((secs, changed)) = slow {
                         *changed |= slow_mode::picker(ui, secs);
                     }
+                    if let Some((on, changed)) = nsfw {
+                        *changed |= nsfw::toggle(ui, on);
+                    }
                     entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => {
@@ -7604,7 +7888,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 let member_limit = limit.and_then(|(most, changed)| changed.then_some(most));
                 let slow_mode_secs = slow.and_then(|(secs, changed)| changed.then_some(secs));
                 let voice_changed = audio_kbps.is_some() || member_limit.is_some();
-                let settings_changed = voice_changed || slow_mode_secs.is_some();
+                let nsfw = nsfw.and_then(|(on, changed)| changed.then_some(on));
+                let settings_changed = voice_changed || slow_mode_secs.is_some() || nsfw.is_some();
                 if name.trim() != channel.name || *topic_changed || settings_changed {
                     command = Some((
                         *server,
@@ -7615,6 +7900,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             audio_kbps,
                             member_limit,
                             slow_mode_secs,
+                            nsfw,
                         },
                     ));
                 }
@@ -7770,6 +8056,26 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         server.send(Command::Delete(*channel, poll, sender, Vec::new()));
                     }
                     command = Some((*index, Command::Delete(*channel, *id, sender, files)));
+                }
+                close |= ui::secondary(ui, t!("common.cancel")).clicked();
+            });
+        }
+        Dialog::TakeDown(index, channel, id, form) => {
+            ui.add(egui::Label::new(t!("takedown.dialog_help")).wrap());
+            ui.add_space(ui::SPACE_S);
+            form.details(ui);
+            let chat = home.servers[*index].chats.get(channel);
+            let ids = chat.map_or_else(|| vec![*id], |chat| takedown_ids(chat, id));
+            let ready = form.request(ids);
+            ui::footer(ui, |ui| {
+                let remove = ui
+                    .add_enabled_ui(ready.is_some(), |ui| {
+                        ui::danger(ui, t!("takedown.remove_button"))
+                    })
+                    .inner
+                    .clicked();
+                if remove && let Some(ready) = ready {
+                    command = Some((*index, Command::Admin(Admin::TakeDown(ready))));
                 }
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
             });
@@ -8159,6 +8465,7 @@ mod tests {
     mod composer_focus;
     mod diagram;
     mod dialogs;
+    mod directory_reports;
     mod emoji;
     mod empty_categories;
     mod file_limits;
@@ -8175,18 +8482,21 @@ mod tests {
     mod message_requests;
     mod message_spacing;
     mod new_members;
+    mod nsfw;
     mod outbox;
     mod presence;
     mod rail;
     mod rate_limits;
     mod reactions;
     mod reply_jump;
+    mod sensitive;
     mod server_emoji;
     mod settings_close;
     mod slow_mode;
     mod sticker_picker;
     mod streams;
     mod switcher;
+    mod takedown;
     mod timeouts;
     mod touch;
     mod uploads;
@@ -8254,6 +8564,7 @@ mod tests {
                 audio_kbps: 0,
                 member_limit: 0,
                 slow_mode_secs: 0,
+                nsfw: false,
                 focus_until: None,
                 flags: vec![("member".into(), 3)],
             }],
@@ -8541,6 +8852,7 @@ mod tests {
             audio_kbps: 64,
             member_limit: 0,
             slow_mode_secs: 0,
+            nsfw: false,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 15)).collect(),
         };

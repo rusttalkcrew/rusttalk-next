@@ -82,7 +82,36 @@ pub struct Attachment {
     pub thumbnail: Option<BlobRef>,
 }
 
+/// A media type parameter marking a picture or video its sender called sensitive.
+/// It rides in the encrypted media type, so the message format and its size limit stay
+/// as they are, and older apps still read the type before the `;`.
+pub const SENSITIVE: &str = ";sensitive";
+
 impl Attachment {
+    /// Whether the sender marked this file as sensitive.
+    pub fn sensitive(&self) -> bool {
+        self.media_type.ends_with(SENSITIVE)
+    }
+
+    /// The media type without the sensitive mark.
+    pub fn plain_media_type(&self) -> &str {
+        self.media_type
+            .strip_suffix(SENSITIVE)
+            .unwrap_or(&self.media_type)
+    }
+
+    /// Mark the file as sensitive; `false` when its media type has no room left.
+    pub fn mark_sensitive(&mut self) -> bool {
+        if self.sensitive() {
+            return true;
+        }
+        if self.media_type.len() + SENSITIVE.len() > MAX_TYPE {
+            return false;
+        }
+        self.media_type.push_str(SENSITIVE);
+        true
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         self.file.ciphertext_len()?;
         if !valid_file_name(&self.name)

@@ -13,6 +13,10 @@ use crate::net::Listed;
 /// It has a public certificate, so no pin.
 pub const DIRECTORY: &str = "https://index.rusttalk.com/";
 
+/// What the official directory accepts, linked from the listing page and the report dialog.
+pub const DIRECTORY_RULES: &str =
+    "https://github.com/rusttalkcrew/rusttalk-next/blob/main/docs/directory-rules.md";
+
 /// Name, address and server ID (base64url). Each ID is that server's `rusttalk-api server-id`;
 /// Join checks it like an invite would. Their certificates are public, so no pin.
 const SERVERS: [(&str, &str, &str); 3] = [

@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{Event, KeyClient, MessageBody, MessageError, SlowMode, UploadRejected},
+    client::{Catalog, Event, KeyClient, MessageBody, MessageError, SlowMode, UploadRejected},
     keys::{self, KeyState, Metadata, Scope},
     messages::{
         Ballot, MessageContext, Poll, PollPart, Reaction, ReactionEmoji, reaction_vote, tally,
@@ -427,6 +427,7 @@ pub(super) async fn scenario(
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
     slow_mode(a, b, c, text).await?;
+    nsfw(a, b, c, text).await?;
     new_member_rules(a, b, c, text).await?;
     timeouts(a, b, c, text, &category).await?;
     Ok((dm, b_message))
@@ -894,6 +895,73 @@ async fn slow_mode(
     println!(
         "#660 verified slow mode: managed, audited, enforced per member, bypassed by moderators"
     );
+    Ok(())
+}
+
+/// #681: only a channel manager marks a channel NSFW, which is audited; every reader's
+/// catalog says so, and unmarking takes it away again.
+async fn nsfw(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    let catalog = a.catalog().await?;
+    let channel = (catalog.channels.iter())
+        .find(|channel| channel.id == text.id)
+        .context("text channel missing")?;
+    ensure!(!channel.nsfw, "a new channel starts unmarked");
+    let name = a.decrypt_metadata(
+        Metadata::ChannelName,
+        &text.id,
+        channel
+            .name_ct
+            .as_deref()
+            .context("channel without a name")?,
+    )?;
+    let update = json!({
+        "category_id": channel.category_id,
+        "position": channel.position,
+        "name_ct": a.encrypt_metadata(Metadata::ChannelName, &text.id, &name)?,
+    });
+    let set = |client: &KeyClient<'_>, nsfw: bool| {
+        let mut update = update.clone();
+        update["nsfw"] = nsfw.into();
+        client
+            .request(Method::PUT, &format!("/v1/channels/{}", encode(&text.id)))
+            .json(&update)
+            .send()
+    };
+    rejected(
+        set(b, true).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    set(a, true).await?.error_for_status()?;
+    let marked = |catalog: Catalog| {
+        (catalog.channels.into_iter()).any(|channel| channel.id == text.id && channel.nsfw)
+    };
+    ensure!(
+        marked(c.catalog().await?),
+        "a member doesn't see the NSFW mark"
+    );
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit.iter().any(|row| row["action"] == "nsfw_changed"
+            && row["target_id"] == encode(&text.id)
+            && row["details"]["after"] == true),
+        "missing NSFW audit"
+    );
+    set(a, false).await?.error_for_status()?;
+    ensure!(!marked(c.catalog().await?), "the NSFW mark stayed");
+    println!("#681 verified NSFW channels: managed, audited, shown to every reader");
     Ok(())
 }
 

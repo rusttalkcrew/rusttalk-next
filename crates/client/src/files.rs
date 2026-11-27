@@ -29,6 +29,7 @@ use crate::{
     home::frame_at,
     link_cards,
     net::{Command, Fetch, MAX_FILE, file_name},
+    sensitive::{self, Hidden, Sensitive},
     server::{Chat, Id, Picture as Picture2, Staged},
     sticker_files,
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
@@ -123,6 +124,8 @@ pub struct Files {
     /// (see `sticker_files`).
     stickers: std::collections::VecDeque<(Id, usize)>,
     sticker_bytes: usize,
+    /// What shows blurred (see `sensitive`).
+    pub sensitive: Sensitive,
 }
 
 /// A link preview file as loaded.
@@ -144,6 +147,8 @@ pub fn is_card(file: &Attachment) -> bool {
 struct Anim {
     frames: Vec<TextureHandle>,
     delays: Vec<u32>,
+    /// A blurred copy of the first frame, for a sensitive picture.
+    blurred: Option<sensitive::Blur>,
 }
 
 impl Anim {
@@ -202,10 +207,15 @@ struct Viewer {
     file: Attachment,
     commands: UnboundedSender<Command>,
     zoom: f32,
+    /// How far the zoomed picture is scrolled, kept so wheel zoom can hold the
+    /// point under the mouse in place.
+    offset: Vec2,
     /// Quarter turns clockwise.
     turns: u8,
     /// Opened from a gallery: its pictures, newest first, and which one shows.
     album: Option<(Vec<Shot>, usize)>,
+    /// Opened in an NSFW channel this person agreed to (see `sensitive::agreed_nsfw`).
+    nsfw: bool,
 }
 
 /// A picture in a gallery the viewer can step through.
@@ -277,6 +287,7 @@ impl Files {
             cards: HashMap::new(),
             stickers: Default::default(),
             sticker_bytes: 0,
+            sensitive: Sensitive::new(data),
         }
     }
 
@@ -324,17 +335,34 @@ impl Files {
         let Some(slot) = slot else {
             return;
         };
+        let mut first = None;
         *slot = match frames {
             Ok(frames) => {
                 let delays = frames.iter().map(|(_, ms)| *ms).collect();
+                // A whole picture is blurred from its thumbnail's copy (`blurred_of`).
+                let blurred = (frames.first())
+                    .filter(|_| fetch != Fetch::Full)
+                    .map(|(image, _)| sensitive::blurred(image));
+                // A whole picture opens from a thumbnail or copy that was checked already.
+                if fetch != Fetch::Full && self.sensitive.wants(&blob.id) {
+                    first = frames.first().map(|(image, _)| image.clone());
+                }
                 let frames = (frames.into_iter())
                     .map(|(image, _)| ctx.load_texture("file", image, TextureOptions::LINEAR))
                     .collect();
-                Picture::Ready(Anim { frames, delays })
+                Picture::Ready(Anim {
+                    frames,
+                    delays,
+                    blurred,
+                })
             }
             Err(true) => Picture::Gone,
             Err(false) => Picture::Failed,
         };
+        // Checked only now, as it is about to show.
+        if let Some(image) = first {
+            self.sensitive.check(ctx, blob.id, &image);
+        }
     }
 
     fn open_viewer(
@@ -371,9 +399,23 @@ impl Files {
             file: file.clone(),
             commands: commands.clone(),
             zoom: 1.0,
+            offset: Vec2::ZERO,
             turns: 0,
             album: None,
+            nsfw: self.sensitive.nsfw_here,
         });
+    }
+
+    /// The blurred copy made from a file's thumbnail or small copy, once loaded.
+    fn blurred_of(&self, file: &Attachment) -> Option<&sensitive::Blur> {
+        let thumb = file.thumbnail.as_ref().and_then(|t| self.images.get(&t.id));
+        [thumb, self.inline.get(&file.file.id)]
+            .into_iter()
+            .flatten()
+            .find_map(|loaded| match &loaded.picture {
+                Picture::Ready(anim) => anim.blurred.as_ref(),
+                _ => None,
+            })
     }
 
     /// Open the viewer on a gallery's picture `at`, with next and previous.
@@ -381,6 +423,7 @@ impl Files {
         let Some(shot) = album.get(at) else {
             return;
         };
+        let nsfw = (self.viewer.as_ref()).map_or(self.sensitive.nsfw_here, |view| view.nsfw);
         let (address, commands, file) = (
             shot.address.clone(),
             shot.commands.clone(),
@@ -389,6 +432,8 @@ impl Files {
         self.open_viewer(&address, &commands, &file);
         if let Some(view) = &mut self.viewer {
             view.album = Some((album, at));
+            // Stepping keeps where the gallery was opened.
+            view.nsfw = nsfw;
         }
     }
 
@@ -913,6 +958,8 @@ pub struct Media {
     commands: UnboundedSender<Command>,
     file: Attachment,
     saved: Option<PathBuf>,
+    /// Shows blurred now, so its menu offers to show it instead of blurring it.
+    blurred: bool,
 }
 
 /// What a picture's menu asks for.
@@ -923,6 +970,8 @@ pub enum MediaAction {
     View,
     ShowInFolder,
     Open,
+    /// Blur (`true`) or show it from now on, on this device.
+    Blur(bool),
 }
 
 /// A picture's own items, above the message's in its menu.
@@ -937,7 +986,19 @@ pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
     if m.item("↗", t!("files.open_default")).clicked() {
         action = Some(MediaAction::Open);
     }
-    action
+    blur_item(m, media).or(action)
+}
+
+/// "Blur" or "Show" for this device, in a picture's or video's menu.
+fn blur_item(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
+    let (icon, label) = if media.blurred {
+        ("👁", t!("sensitive.unblur"))
+    } else {
+        ("🙈", t!("sensitive.blur"))
+    };
+    m.item(icon, label)
+        .clicked()
+        .then_some(MediaAction::Blur(!media.blurred))
 }
 
 /// "Copy image" and "Save as…", where the device can: a picture's menu in the chat and
@@ -960,6 +1021,7 @@ impl Files {
             commands,
             file,
             saved,
+            ..
         } = media;
         match action {
             // Another server's sticker is decoded already.
@@ -977,6 +1039,7 @@ impl Files {
                 }
             }
             MediaAction::Open => self.open_file(commands, file),
+            MediaAction::Blur(blur) => self.sensitive.choose(file, blur),
         }
     }
 }
@@ -1193,7 +1256,11 @@ impl Previews {
                         .load_texture("staged", image, TextureOptions::LINEAR)
                 })
                 .collect();
-            *entry = Preview::Ready(Anim { frames, delays });
+            *entry = Preview::Ready(Anim {
+                frames,
+                delays,
+                blurred: None,
+            });
         }
         match entry {
             Preview::Ready(anim) => show(ui, Some(anim), false),
@@ -1225,8 +1292,16 @@ pub fn keep_previews(ctx: &egui::Context, staged: &[Staged]) {
 /// The staged files in the composer, as equal square tiles in a row that scrolls
 /// sideways: pictures show themselves, play on hover and open large on click; other
 /// files, and pictures that can't be shown, show an icon with their name and size.
-/// Each has a remove button in its corner.
+/// Each has a remove button in its corner. Under them, "Mark as sensitive" when there
+/// are pictures or videos.
 pub fn staged(ui: &mut Ui, chat: &mut Chat) {
+    ui.vertical(|ui| {
+        staged_row(ui, chat);
+        sensitive_mark(ui, chat);
+    });
+}
+
+fn staged_row(ui: &mut Ui, chat: &mut Chat) {
     let previews = Previews::get(ui.ctx());
     let open_id = UiId::unique("staged-open");
     previews.keep(&chat.staged);
@@ -1272,6 +1347,21 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     }
     if let Some(at) = remove {
         discard(&chat.staged.remove(at).path);
+    }
+}
+
+/// The mark goes on the message's pictures and videos (see `sensitive`).
+fn sensitive_mark(ui: &mut Ui, chat: &mut Chat) {
+    let media = (chat.staged.iter()).any(|file| {
+        let name = file.name.to_ascii_lowercase();
+        let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
+        is_picture(&name) || VIDEOS.contains(&extension) || OTHER_PICTURES.contains(&extension)
+    });
+    if media {
+        ui::checkbox(ui, &mut chat.mark_sensitive, t!("sensitive.mark"))
+            .on_hover_text(t!("sensitive.mark_help"));
+    } else {
+        chat.mark_sensitive = false;
     }
 }
 
@@ -1474,12 +1564,16 @@ fn media_face(
     rect: Rect,
     play: bool,
     radius: CornerRadius,
-) {
+) -> Option<Hidden> {
     let c = ui::colors(ui);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, radius, c.side);
     let now = ui.input(|input| input.time);
-    let play = play && plays_inline(&file.name, &file.media_type, file.file.size.into());
+    files.sensitive.poll();
+    let hidden = files.sensitive.hidden(file);
+    let play = play
+        && hidden.is_none()
+        && plays_inline(&file.name, &file.media_type, file.file.size.into());
     // A picture sent without a thumbnail shows its original, decoded small, as in the
     // chat; only while its cell is on screen.
     let original = kind == MediaKind::Picture && shows_original(file);
@@ -1499,15 +1593,19 @@ fn media_face(
     {
         want_thumbnail(&mut files.images, now, commands, thumb);
     }
-    let still = (file.thumbnail.as_ref())
+    let thumb = (file.thumbnail.as_ref())
         .and_then(|thumb| files.images.get(&thumb.id))
         .and_then(|thumb| match &thumb.picture {
-            Picture::Ready(anim) => anim.frames.first(),
+            Picture::Ready(anim) => Some(anim),
             _ => None,
-        })
+        });
+    let still = (thumb.and_then(|anim| anim.frames.first()))
         .or_else(|| loaded.filter(|_| playing.is_none())?.frames.first());
     let shown = playing.or(still);
-    if let Some(texture) = shown {
+    if let Some(hidden) = hidden {
+        let blurred = thumb.or(loaded).and_then(|anim| anim.blurred.as_ref());
+        paint_blurred(ui, blurred, rect, radius, hidden);
+    } else if let Some(texture) = shown {
         let uv = fill_uv(texture.size_vec2(), rect.size());
         Image::new(texture)
             .uv(uv)
@@ -1515,6 +1613,7 @@ fn media_face(
             .paint_at(ui, rect);
     }
     match kind {
+        _ if hidden.is_some() => {}
         MediaKind::Video => {
             let center = rect.center();
             let radius = (rect.width() * 0.16).clamp(12.0, 22.0);
@@ -1563,6 +1662,53 @@ fn media_face(
         let fill = Rect::from_min_size(bar.min, Vec2::new(bar.width() * done, bar.height()));
         painter.rect_filled(fill, 0.0, ui::accent(ui).base);
     }
+    hidden
+}
+
+/// A sensitive picture in `rect`: its blurred copy (or a plain fill before it loads),
+/// with an eye and "Sensitive" over it, unless it is only being checked.
+fn paint_blurred(
+    ui: &Ui,
+    blurred: Option<&sensitive::Blur>,
+    rect: Rect,
+    radius: CornerRadius,
+    hidden: Hidden,
+) {
+    let painter = ui.painter_at(rect);
+    match blurred.map(|blur| blur.texture(ui.ctx())) {
+        Some(texture) => Image::new(texture)
+            .uv(fill_uv(texture.size_vec2(), rect.size()))
+            .corner_radius(radius)
+            .paint_at(ui, rect),
+        None => {
+            painter.rect_filled(rect, radius, ui::colors(ui).side);
+        }
+    }
+    if hidden == Hidden::Checking {
+        return;
+    }
+    painter.rect_filled(rect, radius, OVERLAY_BUTTON);
+    let roomy = rect.width() >= 96.0 && rect.height() >= 72.0;
+    let eye = rect.center() - Vec2::new(0.0, if roomy { 10.0 } else { 0.0 });
+    let font = egui::FontId::proportional(ui::TEXT_ICON_LARGE);
+    painter.text(eye, egui::Align2::CENTER_CENTER, "👁", font, ON_FILL);
+    if roomy {
+        painter.text(
+            rect.center() + Vec2::new(0.0, 14.0),
+            egui::Align2::CENTER_CENTER,
+            t!("sensitive.label"),
+            egui::FontId::proportional(ui::TEXT_SMALL),
+            ON_FILL,
+        );
+    }
+}
+
+/// What a screen reader says for a picture, blurred or not.
+fn media_label(file: &Attachment, hidden: Option<Hidden>) -> String {
+    match hidden {
+        Some(Hidden::Sensitive) => format!("{} · {}", file.name, t!("sensitive.tap_to_show")),
+        _ => file.name.clone(),
+    }
 }
 
 /// A square tile in a gallery: the thumbnail cut to a square (playing when `play`, for
@@ -1576,7 +1722,7 @@ pub fn gallery_tile(
     kind: MediaKind,
     rect: Rect,
     play: bool,
-) -> (Response, bool) {
+) -> (bool, bool) {
     let file = &shot.file;
     let commands = &shot.commands;
     let response = ui.interact(
@@ -1584,9 +1730,7 @@ pub fn gallery_tile(
         UiId::unique(("gallery-tile", file.file.id)),
         Sense::click(),
     );
-    let label = format!("{} · {}", file.name, shot.caption);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-    media_face(
+    let hidden = media_face(
         ui,
         files,
         commands,
@@ -1596,6 +1740,8 @@ pub fn gallery_tile(
         play,
         CornerRadius::ZERO,
     );
+    let label = format!("{} · {}", media_label(file, hidden), shot.caption);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
     let painter = ui.painter_at(rect);
     if response.hovered() {
         painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(20));
@@ -1608,14 +1754,15 @@ pub fn gallery_tile(
         commands: commands.clone(),
         file: file.clone(),
         saved: files.saved_at(file).cloned(),
+        blurred: hidden == Some(Hidden::Sensitive),
     };
     let picked = ui::context_menu(&response, |m| {
         let action = if kind == MediaKind::Picture {
             media_items(m, &media)
         } else {
-            m.item("↗", t!("files.open_default"))
-                .clicked()
-                .then_some(MediaAction::Open)
+            let open =
+                (m.item("↗", t!("files.open_default")).clicked()).then_some(MediaAction::Open);
+            blur_item(m, &media).or(open)
         };
         let jump = shot.jump.is_some() && m.item("💬", t!("gallery.jump")).clicked();
         (action, jump)
@@ -1628,7 +1775,17 @@ pub fn gallery_tile(
         Some(action) => files.media_action(ui.ctx(), action, &media),
         None => {}
     }
-    (response, jump)
+    let open = response.clicked() && !reveal_tap(files, file, hidden);
+    (open, jump)
+}
+
+/// A tap on a blurred picture shows it instead of opening it; whether it did.
+fn reveal_tap(files: &mut Files, file: &Attachment, hidden: Option<Hidden>) -> bool {
+    let tap = hidden == Some(Hidden::Sensitive);
+    if tap {
+        files.sensitive.reveal(file);
+    }
+    tap
 }
 
 /// An album is at most this wide, and as wide as the chat on a phone.
@@ -1719,13 +1876,14 @@ fn album(
             ui.scope_id().with(("album", n, file.file.id)),
             Sense::click(),
         );
-        media_face(ui, files, commands, file, *kind, rect, true, radius);
+        let hidden = media_face(ui, files, commands, file, *kind, rect, true, radius);
         let painter = ui.painter_at(rect);
         let last = n == ALBUM_CELLS - 1 && media.len() > ALBUM_CELLS;
+        let name = media_label(file, hidden);
         let label = if last {
-            format!("{} · {}", file.name, t!("files.album_more", count = more))
+            format!("{name} · {}", t!("files.album_more", count = more))
         } else {
-            file.name.clone()
+            name
         };
         if last {
             painter.rect_filled(rect, radius, OVERLAY_BUTTON);
@@ -1744,7 +1902,7 @@ fn album(
         let response = response
             .on_hover_text(&label)
             .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked() {
+        if response.clicked() && !reveal_tap(files, file, hidden) {
             open = Some(n);
         }
         if *kind == MediaKind::Picture {
@@ -1755,6 +1913,7 @@ fn album(
                     commands: commands.clone(),
                     file: (*file).clone(),
                     saved: files.saved_at(file).cloned(),
+                    blurred: hidden == Some(Hidden::Sensitive),
                 },
             });
         }
@@ -1827,11 +1986,13 @@ pub fn shown_attachments(
     links: &[String],
 ) -> Vec<Shown> {
     let mut shown_pictures = Vec::new();
+    files.sensitive.poll();
     let media = |file: &Attachment, saved: Option<&PathBuf>| Media {
         address: address.clone(),
         commands: commands.clone(),
         file: file.clone(),
         saved: saved.cloned(),
+        blurred: false,
     };
     let (cards, list): (Vec<&Attachment>, Vec<&Attachment>) =
         list.iter().partition(|file| is_card(file));
@@ -1863,7 +2024,9 @@ pub fn shown_attachments(
         list
     };
     for file in list {
-        let play = plays_inline(&file.name, &file.media_type, file.file.size.into())
+        let hidden = files.sensitive.hidden(file);
+        let play = (hidden.is_none()
+            && plays_inline(&file.name, &file.media_type, file.file.size.into()))
             || shows_original(file);
         // Files sent before thumbnails existed for GIFs, or large photos older apps
         // could not make one for, have none; they show their original instead.
@@ -1905,6 +2068,35 @@ pub fn shown_attachments(
         };
         let (mut show, mut retry) = (false, false);
         match picture {
+            Some(Picture::Ready(anim)) if hidden.is_some() => {
+                let size = anim.frames[0].size_vec2();
+                // As big as the picture would show: within the thumbnail and the chat.
+                let fit = (THUMBNAIL / size.max_elem().max(1.0))
+                    .min(ui.available_width() / size.x.max(1.0))
+                    .min(1.0);
+                let size = size * fit;
+                let (rect, shown) = ui.allocate_exact_size(size, Sense::click());
+                let hidden = hidden.unwrap_or(Hidden::Checking);
+                let radius = CornerRadius::same(ui::RADIUS);
+                paint_blurred(ui, anim.blurred.as_ref(), rect, radius, hidden);
+                let label = media_label(file, Some(hidden));
+                shown.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+                let shown = shown.on_hover_text(t!("sensitive.tap_to_show"));
+                if shown.clicked() {
+                    if hidden == Hidden::Sensitive {
+                        files.sensitive.reveal(file);
+                    } else {
+                        show = true;
+                    }
+                }
+                shown_pictures.push(Shown {
+                    response: shown,
+                    media: Media {
+                        blurred: hidden == Hidden::Sensitive,
+                        ..media(file, files.saved_at(file))
+                    },
+                });
+            }
             Some(Picture::Ready(anim)) => {
                 let visible = ui
                     .is_rect_visible(Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL)));
@@ -2348,8 +2540,27 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.add_space(8.0);
                 let room = ui.available_size();
                 let stage = ui.available_rect_before_wrap();
+                // The scroll wheel (or a pinch) over the picture zooms toward the mouse;
+                // sideways still pans.
+                let mut anchor = None;
+                if ui.rect_contains_pointer(stage) {
+                    let factor = ctx.input_mut(|input| {
+                        let wheel = std::mem::take(&mut input.smooth_scroll_delta.y);
+                        input.zoom_delta() * (wheel / 200.0).exp()
+                    });
+                    if factor != 1.0
+                        && let Some(view) = files.viewer.as_mut()
+                    {
+                        let before = view.zoom;
+                        view.zoom = (view.zoom * factor).clamp(0.25, 8.0);
+                        anchor = ctx.pointer_hover_pos().map(|at| (at - stage.min, before));
+                    }
+                }
                 let view = files.viewer.as_ref().expect("checked above");
+                files.sensitive.poll();
+                let hidden = files.sensitive.hidden_in(&file, view.nsfw);
                 let mut picture = None;
+                let mut scrolled = None;
                 match files.full.as_ref().map(|full| &full.picture) {
                     Some(Picture::Ready(anim)) => {
                         let texture = anim.current(ui, true);
@@ -2363,7 +2574,22 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         let fit = (room.x / outline.x).min(room.y / outline.y).min(1.0);
                         let scale = fit * view.zoom;
                         let area = (outline * scale).max(room);
-                        ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        // Dragging pans with a mouse too, not only on touch screens.
+                        let mut scroll = ScrollArea::both().auto_shrink(false).scroll_source(
+                            egui::scroll_area::ScrollSource {
+                                drag: egui::scroll_area::DragScroll::Always,
+                                ..Default::default()
+                            },
+                        );
+                        if let Some((at, before)) = anchor {
+                            // Keep the picture point under the mouse where it is.
+                            let old_scale = fit * before;
+                            let old_area = (outline * old_scale).max(room);
+                            let point = (view.offset + at - old_area / 2.0) / old_scale;
+                            let target = point * scale + area / 2.0 - at;
+                            scroll = scroll.scroll_offset(target.max(Vec2::ZERO));
+                        }
+                        let shown = scroll.show(ui, |ui| {
                             let (rect, _) = ui.allocate_exact_size(area, Sense::hover());
                             // Match the painted bounds, including rotation and scroll offset.
                             let displayed = Rect::from_center_size(rect.center(), outline * scale);
@@ -2373,10 +2599,16 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                                 Sense::click(),
                             ));
                             let unturned = Rect::from_center_size(rect.center(), size * scale);
-                            Image::new(texture)
-                                .rotate(f32::from(view.turns) * FRAC_PI_2, Vec2::splat(0.5))
-                                .paint_at(ui, unturned);
+                            if let Some(hidden) = hidden {
+                                let blurred = files.blurred_of(&file);
+                                paint_blurred(ui, blurred, displayed, CornerRadius::ZERO, hidden);
+                            } else {
+                                Image::new(texture)
+                                    .rotate(f32::from(view.turns) * FRAC_PI_2, Vec2::splat(0.5))
+                                    .paint_at(ui, unturned);
+                            }
                         });
+                        scrolled = Some(shown.state.clamped_offset());
                     }
                     Some(Picture::Gone) => {
                         ui.label(RichText::new(t!("call.no_longer_available")).color(OVERLAY_TEXT));
@@ -2388,24 +2620,36 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         ui.centered_and_justified(|ui| ui.spinner());
                     }
                 }
+                if let (Some(offset), Some(view)) = (scrolled, files.viewer.as_mut()) {
+                    view.offset = offset;
+                }
                 // The picture's menu: right click, or a long press on a touch screen.
                 if let Some(picture) = picture {
+                    let blurred = hidden == Some(Hidden::Sensitive);
+                    if blurred {
+                        let label = media_label(&file, hidden);
+                        picture.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+                    }
+                    if picture.clicked() && blurred {
+                        files.sensitive.reveal(&file);
+                    }
+                    let media = Media {
+                        address: address.clone(),
+                        commands: commands.clone(),
+                        saved: files.saved_at(&file).cloned(),
+                        file: file.clone(),
+                        blurred,
+                    };
                     let picked = ui::context_menu(&picture, |m| {
                         let action = copy_save_items(m);
                         // Phones can't copy pictures or open a save dialog: they hand
                         // the file to the system, as the toolbar's button does.
                         let export =
                             export_label().is_some_and(|label| m.item("⬇", label).clicked());
-                        (action, export)
+                        (blur_item(m, &media).or(action), export)
                     });
                     match picked {
                         Some((Some(action), _)) => {
-                            let media = Media {
-                                address: address.clone(),
-                                commands: commands.clone(),
-                                saved: files.saved_at(&file).cloned(),
-                                file: file.clone(),
-                            };
                             files.media_action(ctx, action, &media);
                         }
                         Some((None, true)) => files.export(ctx, &address, &file),
@@ -2538,6 +2782,7 @@ mod tests {
                     files.full.as_mut().unwrap().picture = Picture::Ready(Anim {
                         frames: vec![texture],
                         delays: vec![100],
+                        blurred: None,
                     });
                 }
                 viewer(ui.ctx(), files);
@@ -2685,13 +2930,25 @@ mod tests {
             unit: egui::MouseWheelUnit::Point,
             phase: egui::TouchPhase::Move,
             source: egui::MouseWheelSource::Unknown,
-            delta: Vec2::new(-200.0, -200.0),
+            delta: Vec2::new(-200.0, 0.0),
             modifiers: egui::Modifiers::NONE,
         });
         harness.run_steps(10);
         assert!(
             painted_image(&harness).left() < after_drag.left(),
-            "wheel must scroll the image"
+            "sideways wheel must scroll the image"
+        );
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            delta: Vec2::new(0.0, 200.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(10);
+        assert!(
+            harness.state().viewer.as_ref().unwrap().zoom > 4.0,
+            "wheel up must zoom in"
         );
         click(&mut harness, egui::pos2(400.0, 320.0), false);
         assert!(harness.state().viewer.is_some(), "panned image");

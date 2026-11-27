@@ -221,6 +221,11 @@ impl Server {
             .find(|channel| channel.id == *id)
     }
 
+    /// Whether this channel is marked NSFW (see `home::nsfw`).
+    pub fn is_nsfw(&self, id: &Id) -> bool {
+        self.channel(id).is_some_and(|channel| channel.nsfw)
+    }
+
     pub fn is_voice(&self, id: &Id) -> bool {
         self.channel(id).is_some_and(|channel| channel.voice)
     }
@@ -558,6 +563,9 @@ pub struct Channel {
     /// Seconds between one member's messages, 0 when slow mode is off.
     #[serde(default)]
     pub slow_mode_secs: u32,
+    /// May hold mature content: the app warns once per device before showing it.
+    #[serde(default)]
+    pub nsfw: bool,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }
@@ -1019,6 +1027,8 @@ pub struct Chat {
     pub edited: HashMap<(Id, Id), Rank>,
     /// Edits whose original is not loaded yet, by person and original ID.
     pending_edits: HashMap<(Id, Id), Msg>,
+    /// Every edit record seen, by original ID, so a takedown removes them too.
+    pub revisions: HashMap<Id, Vec<Id>>,
     /// Votes and ends by poll ID, kept out of `messages` so they never show as lines.
     polls: HashMap<Id, PollEvents>,
     /// Reactions by the first half of their message's ID; they travel as votes.
@@ -1043,6 +1053,8 @@ pub struct Chat {
     pub reacting: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
+    /// "Mark as sensitive" is ticked for the staged pictures and videos.
+    pub mark_sensitive: bool,
     /// Emoji of other servers picked for the draft; they go along as small files.
     pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
@@ -1277,6 +1289,10 @@ impl Chat {
         });
         for edit in edits {
             let key = (edit.person, edit.edit_of.expect("partitioned on edit_of"));
+            let seen = self.revisions.entry(key.1).or_default();
+            if !seen.contains(&edit.id) {
+                seen.push(edit.id);
+            }
             if (self.pending_edits.get(&key)).is_none_or(|old| rank(old) <= rank(&edit)) {
                 self.pending_edits.insert(key, edit);
             }
@@ -1396,6 +1412,7 @@ impl Chat {
         self.messages.retain(|msg| msg.id != *id);
         self.pending_edits.retain(|(_, original), _| original != id);
         self.edited.retain(|(_, original), _| original != id);
+        self.revisions.remove(id);
     }
 
     /// Drop one person's record, leaving another person's under the same ID.
@@ -1554,6 +1571,7 @@ mod tests {
             edit_of: None,
             revision: 0,
             files: Vec::new(),
+            sensitive: false,
             keep: Vec::new(),
             sticker: None,
             friend: None,

@@ -332,6 +332,11 @@ ciphertext is capped at 256 KiB including the 48-byte encryption framing and tag
 decode PNG, JPEG and GIF with pure Rust decoders, a 512×512 canvas limit,
 up to 100 GIF frames and a 32 MiB limit on retained RGBA frame pixels.
 
+A channel's NSFW mark is a plain setting like slow mode, not metadata: it
+is neither encrypted nor signed, so the server knows which channels are
+marked and could add or drop the mark (showing or skipping the warning).
+Which marked channels a device agreed to open stays on that device only.
+
 ### Invite previews
 
 The client generates an independent random 32-byte link key. It seals

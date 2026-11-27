@@ -67,6 +67,7 @@ impl Home {
             edit_of: None,
             revision: 0,
             files: Vec::new(),
+            sensitive: false,
             keep: Vec::new(),
             sticker: None,
             friend: None,
@@ -448,6 +449,7 @@ mod tests {
             audio_kbps: 64,
             member_limit: 0,
             slow_mode_secs: 0,
+            nsfw: false,
             focus_until: None,
             flags: Vec::new(),
         };
