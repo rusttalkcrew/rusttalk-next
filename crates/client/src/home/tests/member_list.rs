@@ -392,6 +392,7 @@ fn link_named(dir: &mut Directory) {
         hide_offline: false,
         bio: None,
         voice_muted: false,
+        timeout_until: None,
     };
     dir.members = vec![
         member(ME, "Me"),
