@@ -499,3 +499,41 @@ fn turning_the_phone_keeps_your_camera_in_full_screen() {
     capture(&mut h, Vec2::new(844.0, 390.0), true, "self-view-turned");
     assert!(self_view(&h), "sideways");
 }
+
+/// A phone held sideways with only the chat shown: the self view stays beside the
+/// sidebar, also when dragged into the bottom left, so it never covers the voice panel
+/// (#692).
+#[test]
+fn sideways_the_self_view_stays_off_the_voice_panel() {
+    let data = tempfile::tempdir().unwrap();
+    let size = Vec2::new(914.0, 380.0);
+    let mut h = sharing(true, size, data.path());
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(4.0, 4.0),
+            force: None,
+        });
+        h.step();
+    }
+    camera_on(&mut h);
+    let mut split = home(&h).layout.call_split();
+    split.stage_hidden = true;
+    home_mut(&mut h).layout.set_call_split(split);
+    h.run_steps(20);
+    capture(&mut h, size, true, "self-view-sideways-chat");
+    assert!(self_view(&h));
+    let at = h.get_by_label(t!("call.your_camera")).rect().center();
+    drag(&mut h, at, egui::pos2(10.0, size.y - 10.0));
+    h.run_steps(20);
+    capture(&mut h, size, true, "self-view-bottom-left");
+    assert_eq!(my_pip(&h).corner, Corner::BottomLeft);
+    let picture = h.get_by_label(t!("call.your_camera")).rect();
+    let leave = h.get_by_label(t!("call.leave")).rect();
+    assert!(
+        picture.left() >= leave.right(),
+        "{picture:?} over {leave:?}"
+    );
+}

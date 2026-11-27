@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The floating camera self view on phones no longer covers the voice panel or your name in the sidebar.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

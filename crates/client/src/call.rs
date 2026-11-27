@@ -59,7 +59,7 @@ pub mod remote;
 mod stage;
 pub mod terminal;
 pub use panel::{Link, call_bar, phone_controls};
-pub use stage::{Stage, full_view, phone_self_view, stage};
+pub use stage::{Stage, full_view, keep_clear, phone_self_view, stage};
 
 pub struct Voice {
     pub external_phones: Vec<(
