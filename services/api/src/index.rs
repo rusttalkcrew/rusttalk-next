@@ -8,7 +8,8 @@ use axum::{
 use rusttalk_core::{
     auth::{Fingerprint, decode, encode},
     index::{
-        Listing, Registration, https_url, now_ms, open_settings, seal_settings, validate_details,
+        Listing, Registration, hidden_format, https_url, now_ms, open_settings, seal_settings,
+        validate_details,
     },
     pinned_tls::https_client,
 };
@@ -23,6 +24,18 @@ use crate::{ApiError, ApiResult, App, auth, payload, store::audit_details};
 pub struct Publication {
     enabled: bool,
     listing: Option<Settings>,
+    /// Set when the directory removed this server; only ever sent, never taken.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    delisted: Option<Delisted>,
+}
+
+/// The directory refused this server: the operator's reason and where to appeal.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct Delisted {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contact: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -39,10 +52,12 @@ pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<P
     let (mut tx, actor) = auth::authenticate_read(&app, &headers).await?;
     auth::require_owner(&mut tx, &actor.person).await?;
     let listing = settings(&app, &mut tx).await?;
+    let delisted = delisted(&app, &mut tx).await?;
     tx.commit().await?;
     Ok(Json(Publication {
         enabled: listing.is_some(),
         listing,
+        delisted,
     }))
 }
 
@@ -53,7 +68,9 @@ pub async fn update(
 ) -> ApiResult<StatusCode> {
     let (mut tx, actor) = auth::authenticate(&app, &headers).await?;
     auth::require_owner(&mut tx, &actor.person).await?;
-    let Publication { enabled, listing } = payload(body)?;
+    let Publication {
+        enabled, listing, ..
+    } = payload(body)?;
     let ciphertext = match (enabled, listing) {
         (false, None) => None,
         (true, Some(settings)) => {
@@ -70,10 +87,15 @@ pub async fn update(
         }
         _ => return Err(ApiError::bad_request("invalid_listing_settings")),
     };
-    query("UPDATE server_settings SET index_listing_ct = ? WHERE id = 1")
-        .bind(ciphertext)
-        .execute(&mut *tx)
-        .await?;
+    // Turning it off forgets a removal; saving again keeps it until the directory answers.
+    query(
+        "UPDATE server_settings SET index_listing_ct = ?1,
+             index_delisted_ct = CASE WHEN ?1 IS NULL THEN NULL ELSE index_delisted_ct END
+         WHERE id = 1",
+    )
+    .bind(ciphertext)
+    .execute(&mut *tx)
+    .await?;
     // The public name and address are left out: only whether it is listed.
     audit_details(
         &mut tx,
@@ -114,6 +136,41 @@ async fn settings(app: &App, db: &mut SqliteConnection) -> ApiResult<Option<Sett
         .transpose()
 }
 
+async fn delisted(app: &App, db: &mut SqliteConnection) -> ApiResult<Option<Delisted>> {
+    let ciphertext: Option<Vec<u8>> =
+        query_scalar("SELECT index_delisted_ct FROM server_settings WHERE id = 1")
+            .fetch_one(db)
+            .await?;
+    ciphertext
+        .map(|ciphertext| {
+            let clear = open_settings(&app.key, &ciphertext)
+                .map_err(|_| ApiError::internal("listing_status_decrypt"))?;
+            serde_json::from_slice(&clear).map_err(|_| ApiError::internal("listing_status_decode"))
+        })
+        .transpose()
+}
+
+/// Remember what the directory last said about this server: removed, or (`None`) fine.
+async fn set_delisted(app: &App, delisted: Option<&Delisted>) -> ApiResult<()> {
+    let ciphertext = delisted
+        .map(|delisted| {
+            let clear = serde_json::to_vec(delisted)
+                .map_err(|_| ApiError::internal("listing_status_encode"))?;
+            seal_settings(&app.key, &clear)
+                .map_err(|_| ApiError::internal("listing_status_encrypt"))
+        })
+        .transpose()?;
+    // Only while still listed: a listing turned off meanwhile has nothing to report.
+    query(
+        "UPDATE server_settings SET index_delisted_ct = ?
+         WHERE id = 1 AND index_listing_ct IS NOT NULL",
+    )
+    .bind(ciphertext)
+    .execute(&app.db)
+    .await?;
+    Ok(())
+}
+
 const REFRESH: Duration = Duration::from_secs(3_600);
 const RETRY: Duration = Duration::from_secs(300);
 
@@ -131,6 +188,8 @@ pub async fn refresh(app: App, mut changed: watch::Receiver<()>) {
                 // A failed attempt retries sooner so a short outage does not use up the lease.
                 let delay = match publish(&app, &mut last_timestamp).await {
                     Ok(()) => REFRESH,
+                    // Retrying sooner would not change the operator's mind.
+                    Err(error) if error.code == "index_delisted" => REFRESH,
                     Err(error) => {
                         tracing::warn!(reason = error.code, "index registration failed");
                         RETRY
@@ -186,26 +245,51 @@ async fn publish(app: &App, last_timestamp: &mut i64) -> ApiResult<()> {
         })?;
     let status = response.status();
     if status == StatusCode::NO_CONTENT {
-        return Ok(());
+        return set_delisted(app, None).await;
     }
     let mut response = response;
     let mut body = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         while let Ok(Some(chunk)) = response.chunk().await {
             body.extend_from_slice(&chunk);
-            if body.len() > 1_024 {
+            if body.len() > 4_096 {
                 body.clear();
                 break;
             }
         }
     })
     .await;
+    let code = index_error(&body);
     tracing::warn!(
         status = status.as_u16(),
-        index_error = index_error(&body),
+        index_error = code,
         "index rejected the registration"
     );
+    if status == StatusCode::FORBIDDEN && code == "server_delisted" {
+        set_delisted(app, Some(&removal(&body))).await?;
+        return Err(ApiError::internal("index_delisted"));
+    }
     Err(ApiError::internal("index_rejected_registration"))
+}
+
+/// The operator's reason and contact, kept only when they are plain, bounded text,
+/// since the owner's app shows them as is.
+fn removal(body: &[u8]) -> Delisted {
+    let plain = |text: Option<String>, limit: usize| {
+        text.map(|text| text.trim().to_owned()).filter(|text| {
+            !text.is_empty()
+                && text.chars().count() <= limit
+                && !text.chars().any(|ch| ch.is_control() || hidden_format(ch))
+        })
+    };
+    let Delisted { reason, contact } = serde_json::from_slice(body).unwrap_or(Delisted {
+        reason: None,
+        contact: None,
+    });
+    Delisted {
+        reason: plain(reason, 500),
+        contact: plain(contact, 200),
+    }
 }
 
 /// Extract the index's short error code, ignoring anything that is not a plain code.
@@ -239,6 +323,7 @@ mod tests {
             Ok(Json(Publication {
                 enabled: false,
                 listing: None,
+                delisted: None,
             }))
         };
         let refused = update(State(app.clone()), as_person(2), off()).await;
@@ -249,6 +334,64 @@ mod tests {
                 .fetch_all(&app.db)
                 .await?;
         assert_eq!(details, [r#"{"enabled":false}"#]);
+        Ok(())
+    }
+
+    #[test]
+    fn removals_keep_only_plain_reasons_and_contacts() {
+        let body =
+            br#"{"error":"server_delisted","reason":" Spam links ","contact":"abuse@example.org"}"#;
+        assert_eq!(
+            removal(body),
+            Delisted {
+                reason: Some("Spam links".into()),
+                contact: Some("abuse@example.org".into()),
+            }
+        );
+        let hidden = r#"{"error":"server_delisted","reason":"a\u202Eb","contact":null}"#;
+        assert_eq!(removal(hidden.as_bytes()).reason, None);
+        let long = format!(
+            r#"{{"error":"server_delisted","reason":"{}"}}"#,
+            "a".repeat(501)
+        );
+        assert_eq!(removal(long.as_bytes()).reason, None);
+        assert_eq!(removal(b"<html>").reason, None);
+    }
+
+    #[tokio::test]
+    async fn the_owner_sees_a_removal_until_listing_is_turned_off() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        let stored = |app: App| async move {
+            let ciphertext: Option<Vec<u8>> =
+                query_scalar("SELECT index_delisted_ct FROM server_settings WHERE id = 1")
+                    .fetch_one(&app.db)
+                    .await?;
+            Ok::<_, anyhow::Error>(ciphertext)
+        };
+        let removed = Delisted {
+            reason: Some("Spam".into()),
+            contact: None,
+        };
+        // Not listed: nothing to remember.
+        set_delisted(&app, Some(&removed)).await?;
+        assert_eq!(stored(app.clone()).await?, None);
+        query("UPDATE server_settings SET index_listing_ct = x'00' WHERE id = 1")
+            .execute(&app.db)
+            .await?;
+        set_delisted(&app, Some(&removed)).await?;
+        let sealed = stored(app.clone()).await?.expect("kept while listed");
+        assert!(!sealed.windows(4).any(|w| w == b"Spam"));
+        let mut db = app.db.acquire().await?;
+        assert_eq!(delisted(&app, &mut db).await?, Some(removed));
+        drop(db);
+        let off = Publication {
+            enabled: false,
+            listing: None,
+            delisted: None,
+        };
+        update(State(app.clone()), as_person(1), Ok(Json(off))).await?;
+        assert_eq!(stored(app.clone()).await?, None);
         Ok(())
     }
 

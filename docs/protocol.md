@@ -1744,6 +1744,15 @@ The API registers again every hour and retries after five minutes when a
 registration fails. It logs failures with a short reason and, when the index
 rejects the registration, the index's error code.
 
+When the index answers `403 server_delisted`, the API keeps the operator's
+`reason` and `contact` (each dropped unless it is plain, bounded text),
+sealed like the listing, and GET adds them until a later registration
+succeeds or the owner turns listing off:
+`"delisted": {"reason": "Spam links", "contact": "abuse@example.org"}`.
+Both fields are optional and `delisted` is absent while the server is
+listed. A removed server retries only at the hourly refresh. PUT does not
+accept `delisted`.
+
 Send `{"enabled":false}` to clear the configured publication and stop renewals.
 The existing listing remains visible until its lease expires. Changing the
 directory URL also lets the old lease expire. Public text is supplied
@@ -1752,13 +1761,15 @@ reports the server's current open joining setting.
 
 ### Index HTTP API
 
-The index uses its own HTTPS base URL and no bearer token.
+The index uses its own HTTPS base URL. Only the operator's admin API takes
+a bearer token.
 
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
 | GET `/v1/servers?q=&page=1` | Optional literal search string and one-based page | 200, array of up to 25 listing objects |
 | POST `/v1/servers` | `{listing, timestamp, signature}` | 204, accepts or refreshes a listing |
+| POST `/v1/servers/{server_id}/reports` | `{reason, note}` | 204, report kept for the operator |
 
 A listing is `{server_id, name, description, address, member_count,
 open_joining}`. The name must contain a non-whitespace character and
@@ -1803,3 +1814,41 @@ that server ID. Expiry is three hours from acceptance. Registration allows
 `503 index_full` when a new server ID would exceed the index's listing cap
 (refreshes of an existing listing are still accepted). Invalid search
 parameters return `400 invalid_query`.
+
+A registration from a server the operator removed gets
+`403 {"error":"server_delisted","reason":"…","contact":"…"}` after its
+signature checks out, so only that server learns the reason. `contact` is
+the operator's `RUSTTALK_INDEX_CONTACT`, or null.
+
+#### Reports
+
+Anyone may report a listed server. `reason` is one of `spam`, `scam`,
+`harassment`, `illegal` or `other`; the optional `note` has at most 500
+scalar values, with line breaks and tabs but no other control or hidden
+characters (as for descriptions). The index stores the reason, note, time
+and a copy of the listing's name and address, and nothing about the sender.
+Reports allow five per ten minutes per IPv4 address or IPv6 /64. Errors:
+`400 invalid_server_id`, `400 invalid_report`, `404 unknown_server` (not
+listed), `429 report_limit` and `503 reports_full` (10,000 open reports).
+
+#### Operator admin API
+
+Off unless `RUSTTALK_INDEX_ADMIN_TOKEN` is set (at least 32 characters);
+then every route needs `Authorization: Bearer <token>` and answers
+`401 admin_token_required` without it. While off, they answer
+`404 admin_disabled`. GET `/v1/admin/` serves a small page that uses them.
+
+| Method and path | Request | Success |
+| --- | --- | --- |
+| GET `/v1/admin/reports` | Empty | 200, `{reports, sanctions}`: the newest 500 reports and every removed server |
+| PUT `/v1/admin/servers/{server_id}` | `{action, reason, address?}` | 204, removes the server now and refuses it from then on |
+| DELETE `/v1/admin/servers/{server_id}` | Empty | 204, lets it list again (`404 not_removed` if it wasn't) |
+| DELETE `/v1/admin/servers/{server_id}/reports` | Empty | 204, dismisses its reports |
+
+`action` is `delist` (refuses that server ID) or `block` (also refuses any
+server ID at the same host, whatever its port, and removes their listings
+now). A block takes the host from `address`, else the current listing, else
+the newest report; `400 address_required` when none is known. `reason` is
+one line of at most 500 scalar values and is shown to the server's owner.
+Removing a server settles its reports. Invalid bodies get
+`400 invalid_sanction`.

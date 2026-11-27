@@ -241,6 +241,31 @@ struct Find {
     error: Option<String>,
     /// Just opened: list servers without waiting for a click.
     opened: bool,
+    /// The "Report server" dialog, while open.
+    report: Option<Report>,
+    /// A report went through.
+    reported: bool,
+}
+
+/// A report on a listed server, being written.
+struct Report {
+    listed: Listed,
+    reason: Option<crate::net::ReportReason>,
+    note: String,
+    sending: bool,
+    error: Option<String>,
+}
+
+impl Report {
+    fn new(listed: Listed) -> Self {
+        Self {
+            listed,
+            reason: None,
+            note: String::new(),
+            sending: false,
+            error: None,
+        }
+    }
 }
 
 impl Find {
@@ -1309,6 +1334,18 @@ impl Home {
                     Err(error) => find.error = Some(error),
                 }
             }
+            Update::Reported(sent) => match sent {
+                Ok(()) => {
+                    self.find.report = None;
+                    self.find.reported = true;
+                }
+                Err(error) => {
+                    if let Some(report) = &mut self.find.report {
+                        report.sending = false;
+                        report.error = Some(error);
+                    }
+                }
+            },
             Update::Listed(checked) => {
                 self.find.checking = false;
                 match checked {
@@ -4234,6 +4271,9 @@ fn find(ui: &mut Ui, home: &mut Home) {
             }
         });
         error_text(ui, find.error.as_deref());
+        if find.reported {
+            ui.weak(t!("find.report_sent"));
+        }
         if find.error.is_some()
             && !find.searching
             && ui::secondary(ui, t!("common.try_again")).clicked()
@@ -4246,6 +4286,7 @@ fn find(ui: &mut Ui, home: &mut Home) {
             ui.weak(t!("home.no_servers_found"));
         }
         let mut pick = None;
+        let mut reporting = None;
         ScrollArea::vertical().show(ui, |ui| {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 for listed in &find.results {
@@ -4282,7 +4323,25 @@ fn find(ui: &mut Ui, home: &mut Home) {
                         if !listed.description.is_empty() {
                             ui.add(Label::new(&listed.description).wrap());
                         }
-                        ui.label(ui::caption(t!("home.members", count = listed.members)));
+                        ui::trailing_row(
+                            ui,
+                            |ui| {
+                                let report = ui::secondary(ui, t!("find.report"));
+                                report.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        Role::Button,
+                                        true,
+                                        t!("find.report_named", server = listed.name),
+                                    )
+                                });
+                                if report.clicked() {
+                                    reporting = Some(listed.clone());
+                                }
+                            },
+                            |ui| {
+                                ui.label(ui::caption(t!("home.members", count = listed.members)));
+                            },
+                        );
                     });
                 }
                 if find.more
@@ -4293,6 +4352,26 @@ fn find(ui: &mut Ui, home: &mut Home) {
                 }
             });
         });
+        if let Some(listed) = reporting {
+            find.report = Some(Report::new(listed));
+            find.reported = false;
+        }
+        if let Some((reason, note)) = report_dialog(ui.ctx(), find) {
+            match directory(&settings) {
+                Ok((url, pin)) => {
+                    let report = find.report.as_mut().expect("dialog open");
+                    report.sending = true;
+                    report.error = None;
+                    let server = report.listed.server.server_id;
+                    home.net.report_listed(url, pin, server, reason, note);
+                }
+                Err(problem) => {
+                    if let Some(report) = &mut find.report {
+                        report.error = Some(problem);
+                    }
+                }
+            }
+        }
         if let Some(listed) = pick {
             find.checking = true;
             find.error = None;
@@ -4317,6 +4396,89 @@ fn find(ui: &mut Ui, home: &mut Home) {
             }
         }
     });
+}
+
+/// The "Report server" dialog: a reason, an optional note; what to send, once sent.
+fn report_dialog(
+    ctx: &egui::Context,
+    find: &mut Find,
+) -> Option<(crate::net::ReportReason, String)> {
+    let report = find.report.as_mut()?;
+    let title = t!("find.report_title", server = report.listed.name);
+    let mut send = None;
+    let mut close = false;
+    let ((), dismissed) = ui::dialog(ctx, "report-server", &title, |ui| {
+        ui.add(Label::new(t!("find.report_help")).wrap());
+        ui.hyperlink_to(t!("admin.directory_rules"), official::DIRECTORY_RULES);
+        ui.add_space(ui::SPACE_S);
+        // Two side by side where they fit, so the dialog fits a short window.
+        let room = ui.available_width();
+        let width = if room >= 2.0 * 200.0 + ui::SPACE_S {
+            (room - ui::SPACE_S) / 2.0
+        } else {
+            room
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(ui::SPACE_S);
+            reason_cards(ui, width, &mut report.reason);
+        });
+        ui.add_space(ui::SPACE_S);
+        let label = ui.label(ui::bold(t!("find.report_note")));
+        ui.add(
+            ui::text_area(&mut report.note)
+                .desired_rows(3)
+                .char_limit(500)
+                .hint_text(t!("find.report_note_hint"))
+                .desired_width(f32::INFINITY),
+        )
+        .labelled_by(label.id);
+        ui::error_text(ui, report.error.as_deref());
+        ui::footer(ui, |ui| {
+            let ready = report.reason.is_some() && !report.sending;
+            let sent = ui
+                .add_enabled_ui(ready, |ui| ui::primary(ui, t!("find.report_send")))
+                .inner
+                .clicked();
+            if let Some(reason) = report.reason.filter(|_| sent) {
+                send = Some((reason, report.note.clone()));
+            }
+            close = ui::secondary(ui, t!("common.cancel")).clicked();
+            if report.sending {
+                ui.spinner();
+            }
+        });
+    });
+    if close || dismissed {
+        find.report = None;
+        return None;
+    }
+    send
+}
+
+/// The reasons to report a listed server, as pick-one cards.
+fn reason_cards(ui: &mut Ui, width: f32, picked: &mut Option<crate::net::ReportReason>) {
+    use crate::net::ReportReason;
+    for reason in ReportReason::ALL {
+        let (icon, title, help) = match reason {
+            ReportReason::Spam => ("🗑", t!("find.reason_spam"), t!("find.reason_spam_help")),
+            ReportReason::Scam => ("🔒", t!("find.reason_scam"), t!("find.reason_scam_help")),
+            ReportReason::Harassment => (
+                "🚫",
+                t!("find.reason_harassment"),
+                t!("find.reason_harassment_help"),
+            ),
+            ReportReason::Illegal => (
+                "⚠",
+                t!("find.reason_illegal"),
+                t!("find.reason_illegal_help"),
+            ),
+            ReportReason::Other => ("❓", t!("find.reason_other"), t!("find.reason_other_help")),
+        };
+        let selected = *picked == Some(reason);
+        if ui::choice_card_sized(ui, width, selected, icon, title, help).clicked() {
+            *picked = Some(reason);
+        }
+    }
 }
 
 pub(crate) fn new_server(
@@ -8145,6 +8307,7 @@ mod tests {
     mod composer_focus;
     mod diagram;
     mod dialogs;
+    mod directory_reports;
     mod emoji;
     mod empty_categories;
     mod file_limits;

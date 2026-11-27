@@ -146,6 +146,14 @@ pub struct PublicListing {
     pub index_fingerprint: String,
 }
 
+/// The directory removed this server: the operator's reason and where to appeal, when
+/// it gave them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Delisted {
+    pub reason: Option<String>,
+    pub contact: Option<String>,
+}
+
 pub struct Ban {
     pub person: Id,
     pub at: i64,
@@ -193,8 +201,9 @@ pub enum AdminUpdate {
     RateLimits(Option<RateLimits>),
     /// `None` from a server too old to have new member rules.
     NewMembers(Option<NewMemberRules>),
-    /// Whether the server is listed, and the saved details.
-    Listing(bool, Option<PublicListing>),
+    /// Whether the server is listed, the saved details, and whether the directory
+    /// removed it.
+    Listing(bool, Option<PublicListing>, Option<Delisted>),
     ServerUpdates(ServerUpdates),
     /// An import is under way: pictures added so far, and in all.
     Progress(usize, usize),
@@ -729,7 +738,16 @@ fn listing(value: &Value) -> AdminUpdate {
         index_url: text("index_url"),
         index_fingerprint: text("index_tls_fingerprint"),
     });
-    AdminUpdate::Listing(value["enabled"].as_bool().unwrap_or_default(), saved)
+    let text = |key: &str| value["delisted"][key].as_str().map(str::to_owned);
+    let delisted = value["delisted"].is_object().then(|| Delisted {
+        reason: text("reason"),
+        contact: text("contact"),
+    });
+    AdminUpdate::Listing(
+        value["enabled"].as_bool().unwrap_or_default(),
+        saved,
+        delisted,
+    )
 }
 
 async fn open_joining(client: &KeyClient<'_>) -> Result<AdminUpdate, String> {

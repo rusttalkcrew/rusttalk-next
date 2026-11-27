@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Report a server in Find servers, and see on Public listing when the directory removed your server and why.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

@@ -62,13 +62,13 @@ mod retry;
 pub mod terminal;
 mod voice;
 
-pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Delisted, ImportItem, Invite, PublicListing};
 pub use calendar::Change;
 pub use control::{ControlView, Ended};
 use directory::{directory, get};
 pub(crate) use directory::{frame_image, picture};
 pub use files::{MAX_FILE, file_name};
-pub use find::{Listed, PAGE_SIZE};
+pub use find::{Listed, PAGE_SIZE, ReportReason};
 use voice::{
     Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, screen_changed,
     send_room, share_screen, stop_finished_shares, stop_lost_video, voice_command, voice_only,
@@ -413,6 +413,8 @@ pub enum Update {
     Found(u32, Result<Vec<Listed>, String>),
     /// A server picked from the directory, checked; errors show in the directory.
     Listed(Result<Box<Preview>, String>),
+    /// How sending a report on a listed server went.
+    Reported(Result<(), String>),
     Status(Url, Status),
     Cached(Url, Box<Directory>, Vec<(Id, Vec<Msg>)>),
     Inaccessible(Url, HashSet<Id>),
@@ -634,6 +636,22 @@ impl Net {
         self.spawn(async move {
             let found = find::search(&index, pin, &query, page).await;
             ctx.send(Update::Found(page, found));
+        });
+    }
+
+    /// Report a listed server to the directory it came from.
+    pub fn report_listed(
+        &self,
+        index: Url,
+        pin: Option<Fingerprint>,
+        server: [u8; 32],
+        reason: ReportReason,
+        note: String,
+    ) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let sent = find::report(&index, pin, &server, reason, &note).await;
+            ctx.send(Update::Reported(sent));
         });
     }
 

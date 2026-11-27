@@ -12,10 +12,10 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Query, Request, State, rejection::JsonRejection},
-    http::{StatusCode, header::CACHE_CONTROL},
+    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use rusttalk_core::index::{
     BODY_LIMIT, CLOCK_SKEW_MS, Listing, Registration, RegistrationError, now_ms,
@@ -34,6 +34,8 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 const MAX_TTL: i64 = 3 * 60 * 60;
 const MAX_LISTINGS: i64 = 10_000;
 
+mod moderation;
+
 #[derive(Clone)]
 struct App {
     db: SqlitePool,
@@ -41,17 +43,33 @@ struct App {
     max_listings: i64,
     trust_proxy: bool,
     rate_limit: Arc<Mutex<RateLimit>>,
+    report_limit: Arc<Mutex<RateLimit>>,
+    /// Unlocks the operator's admin API; without one it is off.
+    admin_token: Option<Arc<str>>,
+    /// Where a delisted server's owner can appeal, as the operator wrote it.
+    contact: Option<Arc<str>>,
 }
 
 struct RateLimit {
     started: Instant,
+    window: Duration,
+    max: u8,
     counts: HashMap<IpAddr, u8>,
 }
 
 impl RateLimit {
-    /// Forget the counts of a finished minute, so client addresses are not kept longer.
+    fn new(window: Duration, max: u8) -> Self {
+        Self {
+            started: Instant::now(),
+            window,
+            max,
+            counts: HashMap::new(),
+        }
+    }
+
+    /// Forget the counts of a finished window, so client addresses are not kept longer.
     fn expire(&mut self) {
-        if self.started.elapsed() >= Duration::from_secs(60) {
+        if self.started.elapsed() >= self.window {
             self.started = Instant::now();
             self.counts.clear();
         }
@@ -67,7 +85,7 @@ impl RateLimit {
             return false;
         }
         let count = self.counts.entry(ip).or_default();
-        if *count >= 16 {
+        if *count >= self.max {
             return false;
         }
         *count += 1;
@@ -131,18 +149,41 @@ async fn run() -> Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080")
         .await
         .context("bind index listener")?;
-    let rate_limit = Arc::new(Mutex::new(RateLimit {
-        started: Instant::now(),
-        counts: HashMap::new(),
-    }));
-    tokio::spawn(prune(db.clone(), rate_limit.clone()));
+    let admin_token = env::var("RUSTTALK_INDEX_ADMIN_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    ensure!(
+        admin_token.as_ref().is_none_or(|token| token.len() >= 32),
+        "RUSTTALK_INDEX_ADMIN_TOKEN must be at least 32 characters"
+    );
+    let contact = env::var("RUSTTALK_INDEX_CONTACT")
+        .ok()
+        .filter(|contact| !contact.trim().is_empty());
+    ensure!(
+        contact
+            .as_ref()
+            .is_none_or(|contact| moderation::plain_text(contact, 200, false)),
+        "RUSTTALK_INDEX_CONTACT must be one line of at most 200 characters"
+    );
+    let rate_limit = Arc::new(Mutex::new(RateLimit::new(Duration::from_secs(60), 16)));
+    let report_limit = Arc::new(Mutex::new(RateLimit::new(Duration::from_secs(600), 5)));
+    tokio::spawn(prune(
+        db.clone(),
+        [rate_limit.clone(), report_limit.clone()],
+    ));
     let app = App {
         db,
         ttl_ms: ttl * 1_000,
         max_listings,
         trust_proxy: env::var("RUSTTALK_INDEX_TRUST_PROXY").as_deref() == Ok("1"),
         rate_limit,
+        report_limit,
+        admin_token: admin_token.map(Into::into),
+        contact: contact.map(Into::into),
     };
+    if app.admin_token.is_none() {
+        tracing::info!("admin API off: set RUSTTALK_INDEX_ADMIN_TOKEN to review reports");
+    }
     let router = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route(
@@ -153,6 +194,18 @@ async fn run() -> Result<()> {
                     limit_registration,
                 ))
                 .get(search),
+        )
+        .route("/v1/servers/{server_id}/reports", post(moderation::report))
+        .route("/v1/admin/", get(moderation::page))
+        .route("/v1/admin/admin.js", get(moderation::script))
+        .route("/v1/admin/reports", get(moderation::reports))
+        .route(
+            "/v1/admin/servers/{server_id}",
+            put(moderation::sanction).delete(moderation::restore),
+        )
+        .route(
+            "/v1/admin/servers/{server_id}/reports",
+            delete(moderation::dismiss),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(app)
@@ -213,14 +266,13 @@ fn clock() -> IndexResult<i64> {
     now_ms().ok_or(IndexError(StatusCode::INTERNAL_SERVER_ERROR, "clock_error"))
 }
 
-async fn prune(db: SqlitePool, rate_limit: Arc<Mutex<RateLimit>>) {
+async fn prune(db: SqlitePool, limits: [Arc<Mutex<RateLimit>>; 2]) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         interval.tick().await;
-        rate_limit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .expire();
+        for limit in &limits {
+            limit.lock().unwrap_or_else(|e| e.into_inner()).expire();
+        }
         if let Err(IndexError(_, reason)) = async { prune_expired(&db, clock()?).await }.await {
             tracing::error!(reason, "pruning expired listings failed");
         }
@@ -237,19 +289,23 @@ async fn prune_expired(db: &SqlitePool, now: i64) -> IndexResult<()> {
     Ok(())
 }
 
+/// The client's address: the proxy's forwarded one behind Caddy, else the peer's.
+fn client_ip(app: &App, peer: SocketAddr, headers: &HeaderMap) -> IndexResult<IpAddr> {
+    if !app.trust_proxy {
+        return Ok(peer.ip());
+    }
+    let values = headers.get_all("x-forwarded-for").iter();
+    rusttalk_core::auth::forwarded_ip(values.map(|value| value.as_bytes()))
+        .ok_or(IndexError(StatusCode::BAD_REQUEST, "invalid_forwarded_ip"))
+}
+
 async fn limit_registration(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> IndexResult<Response> {
-    let ip = if app.trust_proxy {
-        let values = request.headers().get_all("x-forwarded-for").iter();
-        rusttalk_core::auth::forwarded_ip(values.map(|value| value.as_bytes()))
-            .ok_or(IndexError(StatusCode::BAD_REQUEST, "invalid_forwarded_ip"))?
-    } else {
-        peer.ip()
-    };
+    let ip = client_ip(&app, peer, request.headers())?;
     if !app.rate_limit.lock().expect("rate limit lock").allow(ip) {
         return Err(IndexError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -262,17 +318,52 @@ async fn limit_registration(
 async fn register(
     State(app): State<App>,
     body: Result<Json<Registration>, JsonRejection>,
-) -> IndexResult<StatusCode> {
-    let Json(record) = body.map_err(|error| {
-        let status = error.status();
-        match status {
-            StatusCode::PAYLOAD_TOO_LARGE => IndexError(status, "body_too_large"),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE => IndexError(status, "expected_json"),
-            _ => IndexError(StatusCode::BAD_REQUEST, "invalid_json"),
+) -> Response {
+    let record = match body {
+        Ok(Json(record)) => record,
+        Err(error) => {
+            let status = error.status();
+            return match status {
+                StatusCode::PAYLOAD_TOO_LARGE => IndexError(status, "body_too_large"),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE => IndexError(status, "expected_json"),
+                _ => IndexError(StatusCode::BAD_REQUEST, "invalid_json"),
+            }
+            .into_response();
         }
-    })?;
-    save(&app.db, record, clock()?, app.ttl_ms, app.max_listings).await?;
-    Ok(StatusCode::NO_CONTENT)
+    };
+    let now = match clock() {
+        Ok(now) => now,
+        Err(error) => return error.into_response(),
+    };
+    match save(&app.db, record, now, app.ttl_ms, app.max_listings).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(Refused::Error(error)) => error.into_response(),
+        Err(Refused::Delisted(reason)) => {
+            tracing::warn!(reason = "server_delisted", "registration refused");
+            let contact = app.contact.as_deref();
+            let body = json!({"error": "server_delisted", "reason": reason, "contact": contact});
+            (StatusCode::FORBIDDEN, Json(body)).into_response()
+        }
+    }
+}
+
+/// Why a registration was not saved: an error, or the operator's reason for removing it.
+#[derive(Debug, PartialEq, Eq)]
+enum Refused {
+    Error(IndexError),
+    Delisted(String),
+}
+
+impl From<IndexError> for Refused {
+    fn from(error: IndexError) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<sqlx::Error> for Refused {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Error(error.into())
+    }
 }
 
 async fn save(
@@ -281,7 +372,7 @@ async fn save(
     now: i64,
     ttl_ms: i64,
     max_listings: i64,
-) -> IndexResult<()> {
+) -> Result<(), Refused> {
     record.verify(now).map_err(|error| match error {
         RegistrationError::Fields => IndexError(StatusCode::BAD_REQUEST, "invalid_listing"),
         RegistrationError::Timestamp => IndexError(StatusCode::BAD_REQUEST, "stale_registration"),
@@ -295,6 +386,10 @@ async fn save(
         member_count,
         open_joining,
     } = record.listing;
+    // Checked after the signature, so only the server itself learns the reason.
+    if let Some(reason) = moderation::refused(db, &server_id, &address).await? {
+        return Err(Refused::Delisted(reason));
+    }
     // Refreshes always fit; a new server ID needs room under the row cap, which also
     // counts expired rows until pruning so the table size stays bounded.
     let saved = query(
@@ -328,7 +423,8 @@ async fn save(
             IndexError(StatusCode::CONFLICT, "replayed_registration")
         } else {
             IndexError(StatusCode::SERVICE_UNAVAILABLE, "index_full")
-        });
+        }
+        .into());
     }
     Ok(())
 }

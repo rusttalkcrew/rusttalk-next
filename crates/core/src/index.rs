@@ -124,7 +124,7 @@ pub fn validate_details(
 
 /// Bidi overrides, embeddings and isolates can make a listing display as different text,
 /// and invisible separators can make two names look identical.
-fn hidden_format(ch: char) -> bool {
+pub fn hidden_format(ch: char) -> bool {
     matches!(
         ch,
         '\u{200B}' | '\u{202A}'..='\u{202E}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
