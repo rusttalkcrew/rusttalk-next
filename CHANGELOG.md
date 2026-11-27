@@ -21,6 +21,7 @@ Unreleased under the new version and date.
 - Server owners can turn on new member rules: for 10 minutes, an hour, a day or a length you choose after joining, members with only the default role can't upload files, start DMs, mention @everyone or roles, or create invites. New members see a note saying when that unlocks.
 - Moderators can time out a member for 60 seconds up to a week, with an optional reason: until it ends they can read but not send messages, react, create invites or join and talk in voice, and they see a banner saying until when. Moderators can end it early.
 - Raid tools: lock your server down so nobody new can join, automatically when many people join at once, and remove a banned person's messages from the last hour, day or week.
+- On phones, a small self view of your camera stays on screen while your own tile is out of sight, in full screen or outside the call view. Drag it to a corner or minimize it.
 
 ## v0.9.1 - 2026-11-26
 

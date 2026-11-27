@@ -359,3 +359,143 @@ fn popping_out_your_camera_in_full_screen_shows_its_tile() {
         }
     }
 }
+
+/// Our camera on, without sharing a screen; the self view is the fake camera's picture.
+fn camera_on(h: &mut Harness<'static, Option<Screen>>) {
+    let ctx = h.ctx.clone();
+    let home = home_mut(h);
+    home.servers[0].voice.get_mut(&PROJECTS).unwrap()[0].camera = Some("my camera".into());
+    let camera = &mut home.voice.camera;
+    let picture = gradient(120, 160, true);
+    camera.fake_picture(ctx.load_texture("fake camera", picture, Default::default()));
+    camera.fake = Some(Default::default());
+    camera.on = true;
+    h.run_steps(6);
+}
+
+fn self_view(h: &Harness<'_, Option<Screen>>) -> bool {
+    h.query_by_label(t!("call.your_camera")).is_some()
+}
+
+/// On a phone our camera stays in sight: a small self view floats while our own tile is
+/// off screen, and it minimizes to a pill (#656).
+#[test]
+fn phones_keep_your_camera_in_sight_outside_your_tile() {
+    let data = tempfile::tempdir().unwrap();
+    let phone = Vec2::new(390.0, 844.0);
+    for dark in [true, false] {
+        let mut h = sharing(dark, phone, data.path());
+        camera_on(&mut h);
+        // The call view shows our tile, so no self view on top of it.
+        assert!(!self_view(&h));
+
+        // Watching Ann's screen in full screen hides our tile: the self view appears.
+        home_mut(&mut h)
+            .voice
+            .stage
+            .set_presenting_and_full_screen("remote");
+        h.run_steps(20);
+        capture(&mut h, phone, dark, "self-view-full-screen");
+        assert!(self_view(&h));
+
+        // So it does over the channel list, with the call going on.
+        home_mut(&mut h).voice.stage.full = None;
+        home_mut(&mut h).layout.list = true;
+        h.run_steps(20);
+        capture(&mut h, phone, dark, "self-view-list");
+        assert!(self_view(&h));
+
+        // Dragged up and left, it lands in the top left corner, over the list.
+        let at = h.get_by_label(t!("call.your_camera")).rect().center();
+        drag(&mut h, at, egui::pos2(40.0, 120.0));
+        assert_eq!(my_pip(&h).corner, Corner::TopLeft);
+        capture(&mut h, phone, dark, "self-view-dragged");
+
+        // Minimized, it is a pill that brings it back.
+        h.get_by_label(t!("call.your_camera")).hover();
+        h.run_steps(4);
+        h.get_by_label(t!("call.minimize_camera")).click();
+        h.run_steps(20);
+        assert!(my_pip(&h).minimized && !self_view(&h));
+        h.get_by_label(t!("call.show_your_camera")).click();
+        h.run_steps(20);
+        assert!(!my_pip(&h).minimized && self_view(&h));
+
+        // Camera off: nothing floats.
+        home_mut(&mut h).voice.camera.on = false;
+        h.run_steps(6);
+        assert!(!self_view(&h));
+    }
+}
+
+/// Desktops keep their layout: no floating self view.
+#[test]
+fn desktops_have_no_floating_self_view() {
+    let data = tempfile::tempdir().unwrap();
+    let mut h = sharing(true, Vec2::new(1100.0, 700.0), data.path());
+    camera_on(&mut h);
+    home_mut(&mut h)
+        .voice
+        .stage
+        .set_presenting_and_full_screen("remote");
+    h.run_steps(20);
+    assert!(!self_view(&h));
+}
+
+/// A phone turned sideways for a full-screen stream still shows the self view (#656).
+#[test]
+fn a_sideways_phone_keeps_your_camera_in_full_screen() {
+    let data = tempfile::tempdir().unwrap();
+    let sideways = Vec2::new(844.0, 390.0);
+    let mut h = sharing(true, sideways, data.path());
+    // A touch screen: one tap where nothing is.
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(4.0, 4.0),
+            force: None,
+        });
+        h.step();
+    }
+    camera_on(&mut h);
+    home_mut(&mut h)
+        .voice
+        .stage
+        .set_presenting_and_full_screen("remote");
+    h.run_steps(20);
+    capture(&mut h, sideways, true, "self-view-sideways");
+    assert!(self_view(&h));
+    // Clear of the full-screen buttons at the top and bottom.
+    let rect = h.get_by_label(t!("call.your_camera")).rect();
+    assert!(rect.top() >= ui::TOUCH_TARGET && rect.bottom() <= sideways.y - ui::TOUCH_TARGET);
+}
+
+/// Turning the phone sideways while in full screen keeps the self view (#656).
+#[test]
+fn turning_the_phone_keeps_your_camera_in_full_screen() {
+    let data = tempfile::tempdir().unwrap();
+    let mut h = sharing(true, Vec2::new(390.0, 844.0), data.path());
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(4.0, 4.0),
+            force: None,
+        });
+        h.step();
+    }
+    camera_on(&mut h);
+    home_mut(&mut h)
+        .voice
+        .stage
+        .set_presenting_and_full_screen("remote");
+    h.run_steps(20);
+    assert!(self_view(&h), "upright");
+    h.set_size(Vec2::new(844.0, 390.0));
+    h.run_steps(20);
+    capture(&mut h, Vec2::new(844.0, 390.0), true, "self-view-turned");
+    assert!(self_view(&h), "sideways");
+}

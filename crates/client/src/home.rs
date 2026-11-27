@@ -2332,6 +2332,7 @@ pub fn show(
         CentralPanel::default()
             .frame(panel_frame(colors.main))
             .show(ui, |ui| call::full_view(ui, home));
+        call::phone_self_view(ui.ctx(), home);
         // What the call's buttons there open.
         call::screen_dialog(ui.ctx(), home);
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2504,6 +2505,7 @@ pub fn show(
     if !dragging && !home.layout.split_dragging {
         home.layout.save(&home.voice.audio);
     }
+    call::phone_self_view(ui.ctx(), home);
     dialogs(ui.ctx(), home);
     focus::dialog(ui.ctx(), home);
     if !voice_requests::popup(ui.ctx(), home) {
