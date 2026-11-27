@@ -3,7 +3,9 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{FileLimits, FileSettings, MessageHistory, ServerUpdates, decode, encode},
+    auth::{
+        FileLimits, FileSettings, MessageHistory, NewMemberRules, ServerUpdates, decode, encode,
+    },
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -68,6 +70,9 @@ pub enum Admin {
     LoadHistory,
     /// How many messages each channel keeps; 0 keeps them all.
     SaveHistory(i64),
+    LoadNewMembers,
+    /// How long the new member rules last after joining, in seconds; 0 is off.
+    SaveNewMembers(i64),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -171,6 +176,8 @@ pub enum AdminUpdate {
     Files(FileSettings),
     /// `None` from a server too old to change it.
     History(Option<MessageHistory>),
+    /// `None` from a server too old to have new member rules.
+    NewMembers(Option<NewMemberRules>),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -326,20 +333,38 @@ async fn change(
                 t!("admin.done_file_limits")
             }),
         Admin::LoadHistory => {
-            match message_history(client, Method::GET, None).await {
+            match optional_setting(client, HISTORY, Method::GET, None).await {
                 Ok(history) => send(AdminUpdate::History(history)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
             return None;
         }
         Admin::SaveHistory(keep) => {
-            message_history(client, Method::PUT, Some(json!({ "keep": keep })))
+            optional_setting(client, HISTORY, Method::PUT, Some(json!({ "keep": keep })))
                 .await
                 .map(|history| {
                     send(AdminUpdate::History(history));
                     t!("admin.done_history")
                 })
         }
+        Admin::LoadNewMembers => {
+            match optional_setting(client, NEW_MEMBERS, Method::GET, None).await {
+                Ok(rules) => send(AdminUpdate::NewMembers(rules)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return None;
+        }
+        Admin::SaveNewMembers(secs) => optional_setting(
+            client,
+            NEW_MEMBERS,
+            Method::PUT,
+            Some(json!({ "secs": secs })),
+        )
+        .await
+        .map(|rules| {
+            send(AdminUpdate::NewMembers(rules));
+            t!("admin.done_new_members")
+        }),
         Admin::LoadUpdates => {
             match get(client, "/v1/settings/updates").await {
                 Ok(value) => match serde_json::from_value(value) {
@@ -986,22 +1011,25 @@ async fn file_settings(
         .map_err(|error| failed(&error.into()))
 }
 
+const HISTORY: &str = "/v1/settings/message-history";
+const NEW_MEMBERS: &str = "/v1/settings/new-member-rules";
+
 /// `None` when the server predates the setting.
-async fn message_history(
+async fn optional_setting<T: serde::de::DeserializeOwned>(
     client: &KeyClient<'_>,
+    path: &str,
     method: Method,
     body: Option<Value>,
-) -> Result<Option<MessageHistory>, String> {
-    const PATH: &str = "/v1/settings/message-history";
+) -> Result<Option<T>, String> {
     let reply = if method == Method::GET {
-        match client.request(Method::GET, PATH).send().await {
+        match client.request(Method::GET, path).send().await {
             Ok(reply) if reply.status() == reqwest::StatusCode::NOT_FOUND => return Ok(None),
             Ok(reply) if reply.status().is_success() => reply,
             // Ask again through `request`, which puts the problem into words.
-            _ => request(client, method, PATH, body).await?,
+            _ => request(client, method, path, body).await?,
         }
     } else {
-        request(client, method, PATH, body).await?
+        request(client, method, path, body).await?
     };
     reply
         .json()
@@ -1062,6 +1090,8 @@ fn problem(code: &str) -> &'static str {
         "invalid_member_cap" => t!("admin.invalid_member_cap"),
         "invalid_file_limits" => t!("admin.invalid_file_limits"),
         "invalid_message_history" => t!("admin.invalid_message_history"),
+        "invalid_new_member_rules" => t!("admin.invalid_new_members"),
+        "new_member_rules" => t!("new_members.refused"),
         "invalid_listing" | "invalid_listing_settings" => {
             t!("admin.invalid_listing")
         }

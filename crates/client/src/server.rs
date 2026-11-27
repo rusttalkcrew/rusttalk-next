@@ -294,6 +294,8 @@ pub struct Directory {
     /// Emoji and sticker packs in display order, and how many the server allows.
     pub packs: Vec<EmojiPack>,
     pub packs_max: usize,
+    /// While the new member rules apply to this person: when they end, in unix seconds.
+    pub new_member_until: Option<i64>,
     /// `None` on servers from before events.
     pub calendar: Option<Calendar>,
 }

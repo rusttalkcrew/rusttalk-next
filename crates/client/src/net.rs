@@ -2228,6 +2228,7 @@ fn report(ctx: &Ctx, error: anyhow::Error) {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if error.is::<crate::home::new_members::Refused>() => t!("new_members.refused"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));
@@ -3050,6 +3051,7 @@ async fn on_command(
             ctx.send(Update::DmReady(url.clone(), channel));
         }
         Command::Invite(uses, seconds) => {
+            new_member_check(state)?;
             let (id, link) = client.invite(uses, seconds).await?;
             ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
@@ -3114,6 +3116,14 @@ async fn on_command(
     Ok(())
 }
 
+/// Starting DMs and making invites wait while the new member rules apply here.
+fn new_member_check(state: &State) -> Result<()> {
+    if (state.last.as_ref()).is_some_and(|dir| crate::home::new_members::until(dir).is_some()) {
+        return Err(crate::home::new_members::Refused.into());
+    }
+    Ok(())
+}
+
 /// This server's DM channel with a person, made when there is none yet.
 async fn dm_channel(
     ctx: &Ctx,
@@ -3128,6 +3138,7 @@ async fn dm_channel(
     if let Some(dm) = existing {
         return Ok(dm.channel);
     }
+    new_member_check(state)?;
     // Pinned there, before any key is wrapped.
     let scope = client.create_dm(&peer).await?;
     directory(ctx, url, client, state).await?;

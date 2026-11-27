@@ -1916,3 +1916,24 @@ diagram.color_orange = Orange
 diagram.color_red = Red
 diagram.color_purple = Purple
 diagram.color_gray = Grey
+
+# crates/client/src/home/new_members.rs, crates/client/src/admin/new_members.rs
+new_members.note = You’re new here. From {time} you can upload files, start DMs, mention @everyone or roles, and create invites.
+new_members.refused = You’re new here, so you can’t do this yet. The note above the message box says when you can.
+admin.new_members_help = For a while after joining, members with only the default role can’t upload files, start DMs, mention @everyone or roles, or create invites.
+admin.new_members_unsupported = This server doesn’t have new member rules yet. Update the server to use them.
+admin.new_members_off = Off
+admin.new_members_10_min = 10 min
+admin.new_members_1_h = 1 h
+admin.new_members_24_h = 24 h
+admin.new_members_custom = Custom
+admin.new_members_minutes = Length in minutes
+admin.new_members_minutes_help = Up to 30 days.
+admin.new_members_length_m = {minutes} min
+admin.new_members_length_h = {hours} h
+admin.new_members_length_hm = {hours} h {minutes} min
+admin.done_new_members = New member rules saved.
+admin.invalid_new_members = Pick a length of up to 30 days.
+perm.skip_new_member_rules = Skip new member rules
+perm.skip_new_member_rules_help = Upload files, start DMs, mention everyone and create invites right after joining.
+audit.new_member_rules_changed = {actor} changed the new member rules

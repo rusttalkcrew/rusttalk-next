@@ -144,6 +144,19 @@ pub struct MessageHistory {
     pub ceiling: Option<i64>,
 }
 
+/// New member rules (`/v1/settings/new-member-rules`): for `secs` after joining, members
+/// with only the default role can't upload files, start DMs, mention everyone or roles, or
+/// create invites. 0 is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewMemberRules {
+    pub secs: i64,
+}
+
+impl NewMemberRules {
+    /// The longest period: 30 days.
+    pub const MAX_SECS: i64 = 30 * 86_400;
+}
+
 /// Operational update status visible to the server owner.
 #[derive(Default, Serialize, Deserialize)]
 pub struct ServerUpdates {

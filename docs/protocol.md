@@ -117,7 +117,7 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
-| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline}`; `status` is the caller’s own presence choice |
+| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline, new_member_until?}`; `status` is the caller’s own presence choice; `new_member_until` (Unix seconds) is present while the new member rules apply to the caller |
 | PUT `/v1/me/hide-offline` | `{hide_offline}` | Any member. 204. Stores whether member lists leave the caller out while their visible presence is `offline`, and sends `member_changed` |
 | PUT `/v1/me/status` | `{status, picked?}`, `status` one of `online`, `away`, `dnd`, `invisible` | Any member. 204. With `picked: true` (apps that report idle separately), stored as the member's choice for all their devices and sent to their own sockets as `presence_changed` with `chosen`. Without `picked` (older apps, which also send `away` by themselves after a while without input): `away` marks the calling device idle and is not stored; `online` and `invisible` are stored, and `online` also ends the device's idle; while the stored choice is `dnd`, their `online` only ends the device's idle |
 | PUT `/v1/me/idle` | `{idle}`, a boolean | Any member. 204. Whether the calling device has had no input for a while. Kept in memory only, never stored; dropped once the device has been disconnected for the reconnect grace. Older servers answer 404 |
@@ -146,6 +146,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
 | GET `/v1/settings/message-history` | Empty | Any member. 200, `{keep, ceiling?}` |
 | PUT `/v1/settings/message-history` | `{keep}` | `manage_server`. 200, the saved `{keep, ceiling?}` |
+| GET `/v1/settings/new-member-rules` | Empty | Any member. 200, `{secs}` |
+| PUT `/v1/settings/new-member-rules` | `{secs}` | `manage_server`. 200, the saved `{secs}`. A change is audited as `new_member_rules_changed` with `{before, after}` and sends `channel_changed` |
 | GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before` |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
@@ -167,15 +169,23 @@ lowers a saved `keep` (including `0`) to it. A lower `keep` deletes older
 messages in every channel before PUT returns, one channel per transaction,
 with a `message_deleted` event per message. Older servers answer 404.
 
+New member rules: for `secs` (0 = off, the default; at most 2,592,000, 30 days,
+otherwise `400 invalid_new_member_rules`) after `joined_at`, a member whose only
+role is the default one, who is not the Owner and lacks `skip_new_member_rules`,
+gets `403 new_member_rules` from `POST /v1/files`, `POST /v1/invites` and
+`POST /v1/dms` (opening an existing DM still works). Mentions of everyone and roles
+are inside encrypted messages, so apps hold those back themselves: the sender’s app
+doesn’t send them while `new_member_until` is set. Older servers answer 404.
+
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all sixteen flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all seventeen flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
 `create_events`, `manage_events` and `start_focus`. Member (0) has `suggest_events`
 and `start_focus` and starts as the default. Every new role gets `start_focus`
 when its creator has it. The other flags are `invite`, `manage_roles`,
-`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
-`manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
+`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`,
+`manage_emoji` and `skip_new_member_rules`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
 after decoding. Supply a client-generated 16-byte ID when setting an
@@ -272,9 +282,9 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full`, `new_member_rules` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout`, `body_timeout` (a change body must arrive within 30 s; file uploads have their own limits) |
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |

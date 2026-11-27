@@ -60,6 +60,7 @@ pub async fn create(
         tx.commit().await?;
         return Ok((StatusCode::OK, Json(json!({ "id": id }))));
     }
+    crate::new_members::check(&mut tx, &actor).await?;
     let reserved = query("INSERT INTO channel_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
         .execute(&mut *tx)

@@ -1913,3 +1913,24 @@ diagram.color_orange = Oranje
 diagram.color_red = Rood
 diagram.color_purple = Paars
 diagram.color_gray = Grijs
+
+# crates/client/src/home/new_members.rs, crates/client/src/admin/new_members.rs
+new_members.note = Je bent hier nieuw. Vanaf {time} kun je bestanden uploaden, DM’s starten, @everyone of rollen noemen en uitnodigingen maken.
+new_members.refused = Je bent hier nieuw, dus dit kan nog niet. De melding boven het berichtvak zegt wanneer het wel kan.
+admin.new_members_help = Een tijdje na het lid worden kunnen leden met alleen de standaardrol geen bestanden uploaden, DM’s starten, @everyone of rollen noemen of uitnodigingen maken.
+admin.new_members_unsupported = Deze server heeft nog geen regels voor nieuwe leden. Werk de server bij om ze te gebruiken.
+admin.new_members_off = Uit
+admin.new_members_10_min = 10 min
+admin.new_members_1_h = 1 u
+admin.new_members_24_h = 24 u
+admin.new_members_custom = Aangepast
+admin.new_members_minutes = Duur in minuten
+admin.new_members_minutes_help = Tot 30 dagen.
+admin.new_members_length_m = {minutes} min
+admin.new_members_length_h = {hours} u
+admin.new_members_length_hm = {hours} u {minutes} min
+admin.done_new_members = Regels voor nieuwe leden opgeslagen.
+admin.invalid_new_members = Kies een duur van hoogstens 30 dagen.
+perm.skip_new_member_rules = Regels voor nieuwe leden overslaan
+perm.skip_new_member_rules_help = Direct na het lid worden bestanden uploaden, DM’s starten, iedereen noemen en uitnodigingen maken.
+audit.new_member_rules_changed = {actor} heeft de regels voor nieuwe leden gewijzigd

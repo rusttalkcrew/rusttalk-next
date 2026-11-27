@@ -1913,3 +1913,24 @@ diagram.color_orange = Orange
 diagram.color_red = Rot
 diagram.color_purple = Lila
 diagram.color_gray = Grau
+
+# crates/client/src/home/new_members.rs, crates/client/src/admin/new_members.rs
+new_members.note = Du bist neu hier. Ab {time} kannst du Dateien hochladen, DMs starten, @everyone oder Rollen erwähnen und Einladungen erstellen.
+new_members.refused = Du bist neu hier, deshalb geht das noch nicht. Der Hinweis über dem Nachrichtenfeld sagt, ab wann.
+admin.new_members_help = Eine Weile nach dem Beitritt können Mitglieder, die nur die Standardrolle haben, keine Dateien hochladen, keine DMs starten, weder @everyone noch Rollen erwähnen und keine Einladungen erstellen.
+admin.new_members_unsupported = Dieser Server hat noch keine Regeln für neue Mitglieder. Aktualisiere den Server, um sie zu nutzen.
+admin.new_members_off = Aus
+admin.new_members_10_min = 10 Min.
+admin.new_members_1_h = 1 Std.
+admin.new_members_24_h = 24 Std.
+admin.new_members_custom = Eigene
+admin.new_members_minutes = Dauer in Minuten
+admin.new_members_minutes_help = Bis zu 30 Tage.
+admin.new_members_length_m = {minutes} Min.
+admin.new_members_length_h = {hours} Std.
+admin.new_members_length_hm = {hours} Std. {minutes} Min.
+admin.done_new_members = Regeln für neue Mitglieder gespeichert.
+admin.invalid_new_members = Wähle eine Dauer von höchstens 30 Tagen.
+perm.skip_new_member_rules = Regeln für neue Mitglieder überspringen
+perm.skip_new_member_rules_help = Direkt nach dem Beitritt Dateien hochladen, DMs starten, alle erwähnen und Einladungen erstellen.
+audit.new_member_rules_changed = {actor} hat die Regeln für neue Mitglieder geändert

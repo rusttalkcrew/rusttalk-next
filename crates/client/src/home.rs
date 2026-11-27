@@ -114,6 +114,7 @@ mod gallery;
 pub mod layout;
 mod markdown;
 pub mod mentions;
+pub(crate) mod new_members;
 pub mod person;
 mod pokes;
 pub mod polls;
@@ -5940,7 +5941,10 @@ fn composer(
             );
         });
     }
-    let wide = mentions::can_mention_everyone(dir, channel, dir.me);
+    // New members can't mention everyone or roles yet, nor upload files.
+    let new = new_members::until(dir).is_some();
+    new_members::note(ui, dir);
+    let wide = !new && mentions::can_mention_everyone(dir, channel, dir.me);
     let editor = composer_id(channel);
     // From the draft as this frame starts; Enter checks the converted text below.
     let ready = !chat.draft.trim().is_empty()
@@ -5979,13 +5983,13 @@ fn composer(
                 ui::menu_wide(&plus, |m| {
                     let upload = Item::new("📎", t!("home.upload_file"))
                         .hint(t!("home.upload_file_help"))
-                        .enabled(files::PICKER);
+                        .enabled(files::PICKER && !new);
                     if m.add(upload).clicked() {
                         attach = Some(false);
                     }
                     let live = Item::new("📡", t!("home.send_live"))
                         .hint(t!("home.send_live_help"))
-                        .enabled(files::PICKER);
+                        .enabled(files::PICKER && !new);
                     if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
                         attach = Some(true);
                     }
@@ -7948,6 +7952,7 @@ mod tests {
     mod menus;
     mod message_history;
     mod message_spacing;
+    mod new_members;
     mod outbox;
     mod presence;
     mod rail;
