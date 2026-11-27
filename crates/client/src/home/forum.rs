@@ -1037,6 +1037,9 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         Some(Asked::Pick(_, Pick::Delete(id)) | Asked::Delete(id)) => {
             home.dialog = Some(Dialog::Delete(index, channel, id));
         }
+        Some(Asked::Pick(_, Pick::TakeDown(id))) => {
+            home.dialog = Some(Dialog::TakeDown(index, channel, id, Box::default()));
+        }
         // The picker shows over the post's answer box, so that opens with it.
         Some(Asked::Pick(post, Pick::AddReaction(id))) if can_post => {
             folds.open.insert(post);

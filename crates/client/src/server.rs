@@ -1019,6 +1019,8 @@ pub struct Chat {
     pub edited: HashMap<(Id, Id), Rank>,
     /// Edits whose original is not loaded yet, by person and original ID.
     pending_edits: HashMap<(Id, Id), Msg>,
+    /// Every edit record seen, by original ID, so a takedown removes them too.
+    pub revisions: HashMap<Id, Vec<Id>>,
     /// Votes and ends by poll ID, kept out of `messages` so they never show as lines.
     polls: HashMap<Id, PollEvents>,
     /// Reactions by the first half of their message's ID; they travel as votes.
@@ -1277,6 +1279,10 @@ impl Chat {
         });
         for edit in edits {
             let key = (edit.person, edit.edit_of.expect("partitioned on edit_of"));
+            let seen = self.revisions.entry(key.1).or_default();
+            if !seen.contains(&edit.id) {
+                seen.push(edit.id);
+            }
             if (self.pending_edits.get(&key)).is_none_or(|old| rank(old) <= rank(&edit)) {
                 self.pending_edits.insert(key, edit);
             }
@@ -1396,6 +1402,7 @@ impl Chat {
         self.messages.retain(|msg| msg.id != *id);
         self.pending_edits.retain(|(_, original), _| original != id);
         self.edited.retain(|(_, original), _| original != id);
+        self.revisions.remove(id);
     }
 
     /// Drop one person's record, leaving another person's under the same ID.

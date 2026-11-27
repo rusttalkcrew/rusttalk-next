@@ -91,6 +91,24 @@ pub async fn optimize(pool: &SqlitePool, pragma: &'static str) {
     }
 }
 
+/// Copy the WAL into the database and empty it, so pages a takedown overwrote don't linger in
+/// the log. Readers can hold it back; that only leaves it for SQLite's own checkpoints.
+pub async fn checkpoint(pool: &SqlitePool) {
+    let result = async {
+        let _turn = WRITER.lock().await;
+        let mut db = pool.acquire().await?;
+        query_scalar::<_, i64>("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(&mut *db)
+            .await
+    }
+    .await;
+    match result {
+        Ok(0) => {}
+        Ok(_) => tracing::warn!("database checkpoint was busy; the log empties later"),
+        Err(error) => tracing::error!(reason = %error, "database checkpoint failed"),
+    }
+}
+
 pub fn server_key(dir: &Path) -> Result<(SigningKey, bool)> {
     let path = dir.join("server.key");
     let mut seed = Zeroizing::new([0; 32]);

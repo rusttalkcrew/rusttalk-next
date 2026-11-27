@@ -21,6 +21,7 @@ mod roles;
 mod slow_mode;
 mod store;
 mod sync;
+mod takedown;
 #[cfg(test)]
 mod testing;
 mod timeouts;
@@ -487,6 +488,11 @@ fn routes(app: App) -> Router {
         .route("/v1/emoji/{id}/image", get(emoji::image))
         .route("/v1/emoji/{id}/name", put(emoji::rename))
         .layer(RequestBodyLimitLayer::new(4096))
+        .merge(
+            Router::new()
+                .route("/v1/takedowns", get(takedown::list).post(takedown::create))
+                .layer(RequestBodyLimitLayer::new(takedown::BODY_LIMIT)),
+        )
         .merge(
             Router::new()
                 .route(

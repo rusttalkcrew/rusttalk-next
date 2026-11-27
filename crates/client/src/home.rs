@@ -320,6 +320,8 @@ enum Dialog {
     Leave(usize, Option<String>),
     /// Poke someone, with a short note.
     Poke(Id, String),
+    /// The owner removes a message for a legal reason: server, channel, message.
+    TakeDown(usize, Id, Id, Box<crate::admin::takedown::Form>),
 }
 
 pub(crate) enum ChannelEdit {
@@ -5655,6 +5657,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<fr
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
         }
+        Some(Pick::TakeDown(id)) => {
+            if let At::Channel(index, channel) = at {
+                *dialog = Some(Dialog::TakeDown(index, channel, id, Box::default()));
+            }
+        }
         Some(Pick::AddReaction(id)) => {
             chat.reacting = Some(id);
             emoji_picker.open_for_reaction(ui.ctx(), composer_id(key));
@@ -5801,6 +5808,24 @@ fn send_dm(
 /// The stored files (and thumbnails) of message `id` that no other loaded message
 /// uses. Saving a page again sends its kept pictures' references, so deleting one
 /// version must leave the pictures another version still shows.
+/// What a takedown of message `id` removes: it, its edits, and every stored file and
+/// thumbnail it carries, also where someone else posted the same file again.
+fn takedown_ids(chat: &Chat, id: &Id) -> Vec<Id> {
+    let mut ids = vec![*id];
+    ids.extend(chat.revisions.get(id).into_iter().flatten());
+    let files = (chat.messages.iter())
+        .filter(|msg| msg.id == *id)
+        .flat_map(|msg| &msg.files);
+    for file in files {
+        for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
+            if !ids.contains(&blob.id) {
+                ids.push(blob.id);
+            }
+        }
+    }
+    ids
+}
+
 fn own_files(messages: &[Msg], id: &Id) -> Vec<Id> {
     let blobs = |msg: &Msg| -> Vec<Id> {
         (msg.files.iter())
@@ -5964,6 +5989,8 @@ enum Pick {
     JumpToReply(Id, Option<Id>),
     Edit(Id, String),
     Delete(Id),
+    /// The owner's "Remove content" for a legal reason.
+    TakeDown(Id),
     /// Join with, or open the server of, an invite link shown as a card.
     Invite(String),
     Profile(usize, Id, person::Pick),
@@ -6908,6 +6935,8 @@ fn message(
     let can_delete = live
         && (authored
             || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel)));
+    // The owner may have to remove anything in a channel, for a legal reason.
+    let can_take_down = live && dir.perms.owner && !dir.dms.iter().any(|dm| dm.channel == channel);
     let mut pick = invite;
     if let (Some(trigger), Some((index, profile))) = (&trigger, profile)
         && let Some(action) = person::profile(ui, trigger, &profile, false)
@@ -6978,11 +7007,14 @@ fn message(
         if m.item("🆔", t!("home.copy_message_id")).clicked() {
             m.ui().ctx().copy_text(hex::encode(msg.id));
         }
-        if can_delete {
+        if can_delete || can_take_down {
             m.separator();
-            if m.danger("🗑", t!("common.delete")).clicked() {
-                pick = Some(Pick::Delete(msg.id));
-            }
+        }
+        if can_delete && m.danger("🗑", t!("common.delete")).clicked() {
+            pick = Some(Pick::Delete(msg.id));
+        }
+        if can_take_down && m.danger("⚖", t!("takedown.menu")).clicked() {
+            pick = Some(Pick::TakeDown(msg.id));
         }
         pick
     };
@@ -7333,6 +7365,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::Member(index, person) => home.servers[*index].member_name(person),
         Dialog::Delete(..) | Dialog::DeleteDm(..) => t!("home.delete_message_title").into(),
         Dialog::Unshare(..) => t!("files.remove_title").into(),
+        Dialog::TakeDown(..) => t!("takedown.dialog_title").into(),
         Dialog::Leave(index, _) => t!("home.leave_title", server = home.servers[*index].name()),
         Dialog::Poke(person, _) => t!("pokes.poke_title", name = home.peer_name(person)),
     }
@@ -7760,6 +7793,26 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
             });
         }
+        Dialog::TakeDown(index, channel, id, form) => {
+            ui.add(egui::Label::new(t!("takedown.dialog_help")).wrap());
+            ui.add_space(ui::SPACE_S);
+            form.details(ui);
+            let chat = home.servers[*index].chats.get(channel);
+            let ids = chat.map_or_else(|| vec![*id], |chat| takedown_ids(chat, id));
+            let ready = form.request(ids);
+            ui::footer(ui, |ui| {
+                let remove = ui
+                    .add_enabled_ui(ready.is_some(), |ui| {
+                        ui::danger(ui, t!("takedown.remove_button"))
+                    })
+                    .inner
+                    .clicked();
+                if remove && let Some(ready) = ready {
+                    command = Some((*index, Command::Admin(Admin::TakeDown(ready))));
+                }
+                close |= ui::secondary(ui, t!("common.cancel")).clicked();
+            });
+        }
         Dialog::Unshare(index, channel, shared) => {
             ui.label(t!("files.remove_help", name = shared.file.name));
             ui::footer(ui, |ui| {
@@ -8173,6 +8226,7 @@ mod tests {
     mod sticker_picker;
     mod streams;
     mod switcher;
+    mod takedown;
     mod timeouts;
     mod touch;
     mod uploads;
