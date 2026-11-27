@@ -2384,7 +2384,13 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         let fit = (room.x / outline.x).min(room.y / outline.y).min(1.0);
                         let scale = fit * view.zoom;
                         let area = (outline * scale).max(room);
-                        let mut scroll = ScrollArea::both().auto_shrink(false);
+                        // Dragging pans with a mouse too, not only on touch screens.
+                        let mut scroll = ScrollArea::both().auto_shrink(false).scroll_source(
+                            egui::scroll_area::ScrollSource {
+                                drag: egui::scroll_area::DragScroll::Always,
+                                ..Default::default()
+                            },
+                        );
                         if let Some((at, before)) = anchor {
                             // Keep the picture point under the mouse where it is.
                             let old_scale = fit * before;
