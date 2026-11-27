@@ -250,6 +250,37 @@ fn the_viewer_blurs_a_marked_picture_until_tapped() {
 }
 
 #[test]
+fn an_agreed_nsfw_channel_shows_marked_pictures_when_chosen() {
+    let mut f = fixture(DESKTOP, true, Prefs::default());
+    let address = f.address.clone();
+    let home = f.home();
+    // A harness-free fixture writes nowhere: answers stay in memory.
+    home.nsfw_agreed = crate::home::nsfw::Agreed::default();
+    home.nsfw_agreed.agree(&address, PROJECTS);
+    let channel = (home.servers[0].dir.categories.iter_mut())
+        .flat_map(|category| &mut category.channels)
+        .find(|channel| channel.id == PROJECTS)
+        .unwrap();
+    channel.nsfw = true;
+    f.h.run_steps(3);
+    assert!(f.shows(&hidden("beach.png")), "still blurred by default");
+    f.set(Prefs {
+        nsfw_unblurred: true,
+        ..Prefs::default()
+    });
+    assert!(!f.shows(&hidden("beach.png")));
+    assert!(!f.shows(&hidden("album 1.png")));
+    // Only in NSFW channels.
+    let channel = (f.home().servers[0].dir.categories.iter_mut())
+        .flat_map(|category| &mut category.channels)
+        .find(|channel| channel.id == PROJECTS)
+        .unwrap();
+    channel.nsfw = false;
+    f.h.run_steps(3);
+    assert!(f.shows(&hidden("beach.png")));
+}
+
+#[test]
 fn a_picture_can_be_blurred_and_shown_from_its_menu() {
     let mut f = fixture(DESKTOP, true, Prefs::default());
     let landscape = f.home().servers[0].chats[&PROJECTS].messages[0].files[0].clone();

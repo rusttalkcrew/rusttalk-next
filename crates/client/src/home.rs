@@ -4837,7 +4837,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     let kind = home.servers[index].channel(&channel).map(ChannelKind::of);
     // Only while this channel draws; DMs and other screens never count as one.
-    home.files.sensitive.nsfw_here = crate::sensitive::agreed_nsfw(&home.servers[index], &channel);
+    home.files.sensitive.nsfw_here = crate::sensitive::agreed_nsfw(home, index, &channel);
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
     } else if gallery::shown(ui.ctx(), channel) {

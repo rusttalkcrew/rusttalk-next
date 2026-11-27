@@ -18,7 +18,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use rusttalk_core::client::{Attachment, save_json};
 use serde::{Deserialize, Serialize};
 
-use crate::server::{Id, Server};
+use crate::{home::Home, server::Id};
 
 /// Hentai + porn scores at or above this blur a picture. Set high, so ordinary
 /// pictures are not blurred by mistake; marking covers what it misses (see
@@ -291,12 +291,10 @@ pub fn blurred(image: &ColorImage) -> Blur {
     }
 }
 
-/// Whether `channel` is an NSFW channel this person agreed to, where sensitive media
-/// may show unblurred when they choose that in settings.
-// STUB(#681): NSFW channels are built in parallel. Until they merge, no channel is
-// one; then return `channel.is_nsfw && channel.agreed` (or however #681 names them).
-pub fn agreed_nsfw(_server: &Server, _channel: &Id) -> bool {
-    false
+/// Whether `channel` on server `index` is an NSFW channel this device agreed to, where
+/// sensitive media may show unblurred when this person chooses that in settings.
+pub fn agreed_nsfw(home: &Home, index: usize, channel: &Id) -> bool {
+    home.servers[index].is_nsfw(channel) && home.agreed(index, channel)
 }
 
 /// The bundled model (see assets/sensitive/README.md), run with tract.
