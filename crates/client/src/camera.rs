@@ -25,7 +25,7 @@ use rusttalk_core::{
 
 use crate::{
     audio::{Settings, lock},
-    call::{Listing, fill, upload},
+    call::{Listing, fill, upload_camera},
     ui,
 };
 
@@ -358,7 +358,7 @@ impl Camera {
             let size = [frame.width() as usize, frame.height() as usize];
             // Opaque pixels: premultiplied and straight alpha are the same bytes.
             let image = ColorImage::from_rgba_premultiplied(size, frame.as_raw());
-            upload(ctx, &mut self.texture, "self view", image);
+            upload_camera(ctx, &mut self.texture, "self view", image);
         }
         self.texture.as_ref()
     }

@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Camera pictures look smooth instead of grainy in small tiles: they are scaled down by averaging, like the system's own camera preview.
 - Zoom pictures in the viewer with the scroll wheel.
 
 ## v0.10.0 - 2026-11-27
