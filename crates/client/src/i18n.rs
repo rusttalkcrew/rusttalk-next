@@ -203,9 +203,135 @@ fn fill(template: &str, args: &[(&str, &dyn Display)]) -> String {
     out
 }
 
-/// A clock time or date in the current language's format; see the `time.*` keys.
-pub fn time(at: chrono::DateTime<chrono::Local>, pattern: &'static str) -> String {
-    at.format(text(pattern)).to_string()
+/// How clock times show: as the language usually writes them, or always 12-hour
+/// (2:58 PM) or 24-hour (14:58).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Clock {
+    Auto,
+    H12,
+    H24,
+}
+
+pub const CLOCKS: [Clock; 3] = [Clock::Auto, Clock::H12, Clock::H24];
+
+impl Clock {
+    /// The ID kept in the settings.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::H12 => "12h",
+            Self::H24 => "24h",
+        }
+    }
+
+    /// Unknown IDs, say from a newer app on another device, follow the language.
+    pub fn from_id(id: &str) -> Self {
+        CLOCKS
+            .into_iter()
+            .find(|clock| clock.id() == id)
+            .unwrap_or(Self::Auto)
+    }
+}
+
+#[cfg(not(test))]
+static CLOCK: AtomicU8 = AtomicU8::new(Clock::Auto as u8);
+
+// Tests run in parallel, each harness on its own thread; one picking 12-hour must
+// not change the times another one checks.
+#[cfg(test)]
+thread_local! {
+    static CLOCK: std::cell::Cell<Clock> = const { std::cell::Cell::new(Clock::Auto) };
+}
+
+/// Show clock times as `choice` says: a `Clock` ID.
+pub fn set_clock(choice: &str) {
+    let clock = Clock::from_id(choice);
+    #[cfg(not(test))]
+    CLOCK.store(clock as u8, Ordering::Relaxed);
+    #[cfg(test)]
+    CLOCK.set(clock);
+}
+
+fn clock() -> Clock {
+    #[cfg(not(test))]
+    {
+        CLOCKS[usize::from(CLOCK.load(Ordering::Relaxed)).min(CLOCKS.len() - 1)]
+    }
+    #[cfg(test)]
+    {
+        CLOCK.get()
+    }
+}
+
+/// A clock time or date in the current language and clock format. `key` names a
+/// `time.*` pattern; each language has a 12-hour (`_12h`) and a 24-hour (`_24h`)
+/// version of it, so the AM/PM marker sits where that language puts it.
+pub fn time(at: chrono::DateTime<chrono::Local>, key: &'static str) -> String {
+    format_time(current(), clock(), at.naive_local(), key)
+}
+
+/// A time of day in the current clock format, for field hints.
+pub fn clock_time(at: chrono::NaiveTime) -> String {
+    let at = chrono::NaiveDate::default().and_time(at);
+    format_time(current(), clock(), at, "time.clock")
+}
+
+/// 14:58 in `clock`'s format, to show what a choice looks like.
+pub fn clock_example(clock: Clock) -> String {
+    let at = chrono::NaiveTime::from_hms_opt(14, 58, 0).unwrap_or_default();
+    format_time(
+        current(),
+        clock,
+        chrono::NaiveDate::default().and_time(at),
+        "time.clock",
+    )
+}
+
+fn format_time(lang: Lang, clock: Clock, at: chrono::NaiveDateTime, key: &str) -> String {
+    use chrono::Timelike;
+    let twelve = match clock {
+        Clock::H12 => true,
+        Clock::H24 => false,
+        Clock::Auto => lookup(lang, "time.hours") == Some("12"),
+    };
+    let suffix = if twelve { "12h" } else { "24h" };
+    let pattern = lookup(lang, &format!("{key}_{suffix}")).unwrap_or(key);
+    // chrono's `%p` is English only; each language names its own.
+    let marker = lookup(lang, if at.hour() < 12 { "time.am" } else { "time.pm" });
+    let pattern = pattern.replace("%p", marker.unwrap_or_default());
+    at.format(&pattern).to_string()
+}
+
+/// `text` without an AM or PM marker before or after it, and whether that was PM;
+/// `None` when it has none. Knows this language's markers and the English ones.
+pub fn strip_meridiem(text: &str) -> (&str, Option<bool>) {
+    let lang = current();
+    let markers = [
+        (lookup(lang, "time.am"), false),
+        (lookup(lang, "time.pm"), true),
+        (Some("a.m."), false),
+        (Some("p.m."), true),
+        (Some("am"), false),
+        (Some("pm"), true),
+    ];
+    for (marker, pm) in markers {
+        let Some(marker) = marker.filter(|marker| !marker.is_empty()) else {
+            continue;
+        };
+        let n = marker.len();
+        if text
+            .get(..n)
+            .is_some_and(|head| head.eq_ignore_ascii_case(marker))
+        {
+            return (text[n..].trim(), Some(pm));
+        }
+        let start = text.len().saturating_sub(n);
+        let tail = text.get(start..).filter(|_| text.len() >= n);
+        if tail.is_some_and(|tail| tail.eq_ignore_ascii_case(marker)) {
+            return (text[..start].trim(), Some(pm));
+        }
+    }
+    (text, None)
 }
 
 /// A number with `decimals` decimals and the language's decimal separator.
@@ -305,6 +431,93 @@ mod tests {
             }
         }
         assert!(used > 100, "found only {used} keys");
+    }
+
+    #[test]
+    fn clock_formats_in_every_language() {
+        use chrono::Timelike;
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 3, 7)
+            .unwrap()
+            .and_hms_opt(14, 58, 0)
+            .unwrap();
+        let night = at.with_hour(0).unwrap().with_minute(5).unwrap();
+        // Language, clock, then 14:58, 14:58 with the day, and 00:05.
+        let cases = [
+            (
+                Lang::En,
+                Clock::Auto,
+                "2:58 PM",
+                "Mar 7, 2:58 PM",
+                "12:05 AM",
+            ),
+            (
+                Lang::En,
+                Clock::H12,
+                "2:58 PM",
+                "Mar 7, 2:58 PM",
+                "12:05 AM",
+            ),
+            (Lang::En, Clock::H24, "14:58", "Mar 7, 14:58", "00:05"),
+            (Lang::De, Clock::Auto, "14:58", "7.3. 14:58", "00:05"),
+            (Lang::De, Clock::H12, "2:58 PM", "7.3. 2:58 PM", "12:05 AM"),
+            (Lang::De, Clock::H24, "14:58", "7.3. 14:58", "00:05"),
+            (Lang::Nl, Clock::Auto, "14:58", "7-3 14:58", "00:05"),
+            (
+                Lang::Nl,
+                Clock::H12,
+                "2:58 p.m.",
+                "7-3 2:58 p.m.",
+                "12:05 a.m.",
+            ),
+            (Lang::Nl, Clock::H24, "14:58", "7-3 14:58", "00:05"),
+            (Lang::Ja, Clock::Auto, "14:58", "3月7日 14:58", "00:05"),
+            (
+                Lang::Ja,
+                Clock::H12,
+                "午後2:58",
+                "3月7日 午後2:58",
+                "午前12:05",
+            ),
+            (Lang::Ja, Clock::H24, "14:58", "3月7日 14:58", "00:05"),
+        ];
+        for (lang, clock, time, day_time, midnight) in cases {
+            let format = |at, key| format_time(lang, clock, at, key);
+            assert_eq!(format(at, "time.clock"), time, "{lang:?} {clock:?}");
+            assert_eq!(format(at, "time.day_clock"), day_time, "{lang:?} {clock:?}");
+            assert_eq!(format(night, "time.clock"), midnight, "{lang:?} {clock:?}");
+            // The full date has the year and the same clock.
+            let full = format(at, "time.date_clock");
+            assert!(full.contains("2026") && full.ends_with(time), "{full}");
+        }
+    }
+
+    #[test]
+    fn clock_ids_round_trip() {
+        for clock in CLOCKS {
+            assert_eq!(Clock::from_id(clock.id()), clock);
+        }
+        assert_eq!(Clock::from_id("36h"), Clock::Auto);
+    }
+
+    #[test]
+    fn a_test_picking_a_clock_leaves_other_tests_alone() {
+        std::thread::spawn(|| {
+            set_clock("12h");
+            assert_eq!(clock(), Clock::H12);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(clock(), Clock::Auto);
+    }
+
+    #[test]
+    fn meridiem_markers_come_off_either_end() {
+        assert_eq!(strip_meridiem("2:58 PM"), ("2:58", Some(true)));
+        assert_eq!(strip_meridiem("9am"), ("9", Some(false)));
+        assert_eq!(strip_meridiem("10:00 p.m."), ("10:00", Some(true)));
+        assert_eq!(strip_meridiem("PM 2:58"), ("2:58", Some(true)));
+        assert_eq!(strip_meridiem("14:58"), ("14:58", None));
+        assert_eq!(strip_meridiem("p"), ("p", None));
     }
 
     #[test]
