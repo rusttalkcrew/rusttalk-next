@@ -418,22 +418,23 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
     let extras = Extras::of(&mut home.voice, false);
     let buttons = 5 + usize::from(extras.screen);
     let chevrons = 3 + usize::from(extras.screen);
-    let gaps = (buttons + chevrons) as f32 * SPACE_XS + ui::SPACE_S;
+    // A chevron sits flush against its button, in one box.
+    let gaps = buttons as f32 * SPACE_XS + ui::SPACE_S;
     let full = buttons as f32 * BAR_BUTTON + chevrons as f32 * BAR_CHEVRON + gaps;
     let room = area.width() - 2.0 * ui::SPACE_S;
     // Narrow windows drop the chevrons first, then shrink the buttons.
     let with_chevrons = full <= room;
-    let bare = full - chevrons as f32 * (BAR_CHEVRON + SPACE_XS);
+    let bare = full - chevrons as f32 * BAR_CHEVRON;
     let width = if with_chevrons { full } else { bare.min(room) };
     let button = if with_chevrons || bare <= room {
         BAR_BUTTON
     } else {
-        ((room - (gaps - chevrons as f32 * SPACE_XS)) / buttons as f32).max(ui::ICON_BUTTON)
+        ((room - gaps) / buttons as f32).max(ui::ICON_BUTTON)
     };
     let height = BAR_BUTTON + 2.0 * SPACE_XS;
     let rect = Rect::from_center_size(area.center(), Vec2::new(width + 2.0 * SPACE_XS, height));
     let c = ui::colors(ui);
-    let round = egui::CornerRadius::same((height / 2.0) as u8);
+    let round = ui::RADIUS;
     ui.painter().rect_filled(rect, round, c.side);
     ui.painter().rect_stroke(
         rect,
@@ -454,9 +455,12 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
     let ui = &mut bar;
     let audio = home.voice.audio.clone();
     let (inputs, outputs) = audio.devices();
+    let start = box_start(ui);
     user_bar::mic_button(ui, home, size);
     if with_chevrons {
+        ui.add_space(-SPACE_XS);
         let more = ui::chevron_button(ui, t!("call.mic_options"), chevron);
+        box_end(ui, start, &more);
         let mut s = audio.settings();
         if let Some(Some(pick)) = ui::menu_above(&more, |m| {
             device_menu(m, t!("call.microphone"), &s.input, &inputs, &mut picked)
@@ -465,9 +469,12 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
             audio.set_settings(s);
         }
     }
+    let start = box_start(ui);
     user_bar::deafen_button(ui, home, size);
     if with_chevrons {
+        ui.add_space(-SPACE_XS);
         let more = ui::chevron_button(ui, t!("call.sound_options"), chevron);
+        box_end(ui, start, &more);
         let mut s = audio.settings();
         if let Some(Some(pick)) = ui::menu_above(&more, |m| {
             device_menu(m, t!("call.speakers"), &s.output, &outputs, &mut picked)
@@ -476,9 +483,12 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
             audio.set_settings(s);
         }
     }
+    let start = box_start(ui);
     camera_button(ui, &mut home.voice, &can, size);
     if with_chevrons {
+        ui.add_space(-SPACE_XS);
         let more = ui::chevron_button(ui, t!("call.camera_options"), chevron);
+        box_end(ui, start, &more);
         let found = if ui::menu_open(&more) {
             home.voice.camera.found(ui.ctx())
         } else {
@@ -496,13 +506,16 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
         }
     }
     if extras.screen {
+        let start = box_start(ui);
         screen_button(ui, &mut home.voice, &can, size, &mut picked);
         if with_chevrons {
+            ui.add_space(-SPACE_XS);
             let more = ui
                 .add_enabled_ui(can.connected && can.share_video, |ui| {
                     ui::chevron_button(ui, t!("call.screen_options"), chevron)
                 })
                 .inner;
+            box_end(ui, start, &more);
             let sharing = home.voice.sharing;
             ui::menu_above(&more, |m| {
                 if sharing == Sharing::Off {
@@ -532,6 +545,19 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
         home.settings = Some(Tab::Video);
     }
     Some(rect)
+}
+
+/// Where a button and its chevron start, so `box_end` can draw one box behind both.
+fn box_start(ui: &Ui) -> (egui::layers::ShapeIdx, f32) {
+    (ui.painter().add(egui::Shape::Noop), ui.cursor().left())
+}
+
+/// One box behind a button and the chevron `end` that belongs to it.
+fn box_end(ui: &Ui, (shape, left): (egui::layers::ShapeIdx, f32), end: &Response) {
+    let rect = Rect::from_x_y_ranges(left..=end.rect.right(), end.rect.y_range());
+    let fill = ui::colors(ui).button.gamma_multiply(0.45);
+    ui.painter()
+        .set(shape, egui::epaint::RectShape::filled(rect, RADIUS, fill));
 }
 
 /// A device list for a chevron menu: the system default, then each device, with a

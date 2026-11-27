@@ -4446,19 +4446,6 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         (None, None, Some(area))
     };
     if let Some(rect) = stage {
-        // Phones have their row below; full screen brings its own. The bar gets its
-        // own strip under the stage so it never covers a tile.
-        let bar = joined && !home.layout.phone && home.voice.stage.full.is_none();
-        let mut rect = rect;
-        if bar {
-            let strip = Rect::from_min_max(
-                egui::pos2(rect.left(), rect.bottom() - call::STAGE_BAR_HEIGHT),
-                rect.max,
-            );
-            rect.max.y = strip.top();
-            let mut ui = ui.new_child(UiBuilder::new().max_rect(strip));
-            call::stage_controls(&mut ui, home, strip);
-        }
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         call::stage(&mut ui, home, index, channel);
     }

@@ -625,8 +625,19 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let c = ui::colors(ui);
     ui.painter().rect_filled(rect, ui::RADIUS, c.rail);
+    let joined = home.voice.in_call(&home.servers[index], &channel);
+    // The call's controls along the bottom, inside the stage; the tiles stay above
+    // them. Phones have their row below the stage, full screen its own.
+    let mut rect = rect;
+    if joined && !home.layout.phone && home.voice.stage.full.is_none() {
+        let strip = Rect::from_min_max(
+            pos2(rect.left(), rect.bottom() - super::panel::STAGE_BAR_HEIGHT),
+            rect.max,
+        );
+        super::panel::stage_controls(ui, home, strip);
+        rect.max.y = strip.top() + GAP;
+    }
     let server = &home.servers[index];
-    let joined = home.voice.in_call(server, &channel);
     let calling = crate::home::voice_requests::calling(&home.voice, server);
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
     let ctx = ui.ctx().clone();
