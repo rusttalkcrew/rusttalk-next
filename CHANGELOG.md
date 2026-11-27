@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Right-click the mic, sound, camera or screen share button in a call to pick a device, start sharing or set screen share quality.
+
 ## v0.11.0 - 2026-11-27
 
 - Zoom pictures in the viewer with the scroll wheel.

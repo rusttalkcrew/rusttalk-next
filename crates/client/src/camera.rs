@@ -105,6 +105,21 @@ pub fn options(settings: &Settings) -> Options {
 }
 
 impl Camera {
+    /// The cameras found so far; the first call starts looking.
+    pub fn found(&mut self, ctx: &egui::Context) -> Vec<String> {
+        let names = self.names.get_or_insert_with(|| {
+            let names = Arc::new(Mutex::new(Listing::Loading));
+            fill(ctx, &names, "cameras", || {
+                Ok(list_cameras()?.into_iter().map(|c| c.name).collect())
+            });
+            names
+        });
+        match &*lock(names) {
+            Listing::Found(found) => found.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self {
             runtime,
@@ -423,17 +438,7 @@ fn launch(
 
 /// Settings → Video.
 pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
-    let names = camera.names.get_or_insert_with(|| {
-        let names = Arc::new(Mutex::new(Listing::Loading));
-        fill(ui.ctx(), &names, "cameras", || {
-            Ok(list_cameras()?.into_iter().map(|c| c.name).collect())
-        });
-        names
-    });
-    let found = match &*lock(names) {
-        Listing::Found(found) => found.clone(),
-        _ => Vec::new(),
-    };
+    let found = camera.found(ui.ctx());
     ui::page_section(ui, t!("camera.camera"));
     ui::setting_row(ui, t!("camera.camera"), "", |ui| {
         let combo = ComboBox::from_id_salt("camera")
@@ -514,7 +519,7 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
     );
 }
 
-fn camera_label(name: &str) -> String {
+pub(crate) fn camera_label(name: &str) -> String {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     match name {
         "front" => return t!("camera.front").into(),
