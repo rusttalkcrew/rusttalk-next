@@ -5842,6 +5842,19 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+/// On a computer, a newly opened channel or DM is ready to type in. Phones skip
+/// this: focusing would raise the keyboard over the chat.
+fn focus_on_switch(ui: &Ui, field: &egui::Response) {
+    if ui::TOUCH {
+        return;
+    }
+    let shown = UiId::unique("composer_shown");
+    if ui.data(|d| d.get_temp::<UiId>(shown)) != Some(field.id) {
+        ui.data_mut(|d| d.insert_temp(shown, field.id));
+        field.request_focus();
+    }
+}
+
 /// The unsent notice: the toast whenever no other one shows. Done (`true`) only
 /// once its own text was drawn.
 #[cfg(any(target_os = "android", test))]
@@ -6002,6 +6015,7 @@ fn composer(
                         composer_field(ui, chat, dir, online, channel, hint, wide, emoji_picker)
                     })
                     .inner;
+                focus_on_switch(ui, &field);
                 ui.add_enabled_ui(online, |ui| {
                     for (glyph, tip, tab) in [
                         ("☺", t!("home.emoji_picker"), PickerTab::Emoji),
@@ -7934,6 +7948,7 @@ mod tests {
     mod avatars;
     mod call_controls;
     mod camera_pip;
+    mod composer_focus;
     mod diagram;
     mod dialogs;
     mod emoji;
