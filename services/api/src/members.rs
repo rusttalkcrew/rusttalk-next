@@ -863,6 +863,7 @@ mod tests {
             presence: Default::default(),
             voice: None,
             session_ttl: crate::auth::SESSION_TTL,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         for open_joining in [false, true] {

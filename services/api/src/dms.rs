@@ -1,3 +1,6 @@
+use std::{collections::HashMap, env, sync::Mutex};
+
+use anyhow::Context;
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
@@ -5,13 +8,69 @@ use axum::{
 };
 use rusttalk_core::{
     auth::decode,
+    identity::PersonId,
     keys::{Event, Kind, Scope},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{query, query_scalar};
 
-use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, payload};
+use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, payload, store::now};
+
+/// New DM conversations one person may start on this server per hour. Enough for
+/// someone joining a server full of people they already talk to (each needs a copy
+/// here), too few to message a whole server. Old DMs reopened don't count.
+const NEW_PER_HOUR: usize = 20;
+const HOUR: i64 = 3600;
+
+/// When each person last started new DMs here. Kept in memory only, so the server
+/// stores nothing new about who writes to whom; a restart forgets it.
+pub struct Starts {
+    limit: usize,
+    started: Mutex<HashMap<PersonId, Vec<i64>>>,
+}
+
+impl Default for Starts {
+    fn default() -> Self {
+        Self::new(NEW_PER_HOUR)
+    }
+}
+
+impl Starts {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            started: Mutex::default(),
+        }
+    }
+
+    /// The limit, or a smaller one for development stacks so end-to-end tests can reach it.
+    pub fn from_env() -> anyhow::Result<Self> {
+        if env::var("RUSTTALK_DEV").as_deref() == Ok("1")
+            && let Ok(value) = env::var("RUSTTALK_DEV_NEW_DMS_PER_HOUR")
+            && !value.is_empty()
+        {
+            return Ok(Self::new(value.parse().context("invalid dev DM limit")?));
+        }
+        Ok(Self::default())
+    }
+
+    /// Count a new DM by `person` at `at` (Unix seconds), or refuse it over the limit.
+    fn take(&self, person: PersonId, at: i64) -> ApiResult<()> {
+        // Nothing panics while it is held, so a poisoned map is still consistent.
+        let mut started = (self.started.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        started.retain(|_, times| {
+            times.retain(|time| *time > at - HOUR);
+            !times.is_empty()
+        });
+        let times = started.entry(person).or_default();
+        if times.len() >= self.limit {
+            return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "new_dm_limit"));
+        }
+        times.push(at);
+        Ok(())
+    }
+}
 
 #[derive(Deserialize)]
 pub struct NewDm {
@@ -60,6 +119,7 @@ pub async fn create(
         tx.commit().await?;
         return Ok((StatusCode::OK, Json(json!({ "id": id }))));
     }
+    app.dm_starts.take(actor.person, now()?)?;
     let reserved = query("INSERT INTO channel_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
         .execute(&mut *tx)
@@ -92,4 +152,27 @@ pub async fn create(
         channel: id.clone(),
     });
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_dms_are_limited_per_person_and_hour() {
+        let starts = Starts::new(2);
+        let (ana, bo) = ([1; 32], [2; 32]);
+        starts.take(ana, 100).unwrap();
+        starts.take(ana, 200).unwrap();
+        let refused = starts.take(ana, 300).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (StatusCode::TOO_MANY_REQUESTS, "new_dm_limit")
+        );
+        // Someone else has their own hour.
+        starts.take(bo, 300).unwrap();
+        // An hour after the first one, there is room for one more.
+        starts.take(ana, 100 + HOUR).unwrap();
+        assert!(starts.take(ana, 150 + HOUR).is_err());
+    }
 }

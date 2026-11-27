@@ -76,6 +76,7 @@ struct App {
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
     session_ttl: i64,
+    dm_starts: Arc<dms::Starts>,
 }
 
 /// Events a socket may fall behind before it must resync. A slot frees once every socket has
@@ -254,6 +255,7 @@ async fn run() -> Result<()> {
                 listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
                 session_ttl: auth::session_ttl()?,
+                dm_starts: Arc::new(dms::Starts::from_env()?),
             })
             .await?;
         }

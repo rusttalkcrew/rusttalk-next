@@ -51,6 +51,7 @@ const SYNCED: [&str; 20] = [
     "language",
     "clock",
     "friends_only",
+    "allow_dms",
     "display_name",
     "bio",
     "name_overrides",

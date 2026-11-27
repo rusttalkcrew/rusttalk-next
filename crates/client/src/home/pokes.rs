@@ -5,7 +5,7 @@ use rusttalk_core::client::MAX_POKE_CHARS;
 
 use super::{Dialog, Home, View, empty, face, pane_title, time};
 use crate::{
-    friends::Relation,
+    friends::Sort,
     net::{Command, Draft},
     notify::{self, Arrival, Mention},
     pokes::Poke,
@@ -93,10 +93,7 @@ impl Home {
         if !incoming && msg.person != me {
             return;
         }
-        if incoming
-            && (self.friends.relation(&peer) == Relation::Blocked
-                || self.friends.is_request(&peer, self.friends_only()))
-        {
+        if incoming && self.dm_sort(&peer) != Sort::Shown {
             return;
         }
         let server = &self.servers[index];

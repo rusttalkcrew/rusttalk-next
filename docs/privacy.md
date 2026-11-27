@@ -79,8 +79,11 @@ Servers don't learn who is friends with whom, who is blocked, or that a
 message is a friend request. They still see what they see for any DM: that
 the two people have one, and each message's size and time. A friend message
 is as large as a one-character text message.
-Blocking and "Friends only" work in the app: servers keep delivering those
-messages, and the app hides them or keeps them quiet.
+Blocking, message requests and "Friends only" work in the app: servers keep
+delivering those messages, and the app hides them or keeps them quiet.
+Accepting or deleting a message request is also kept in the sync blob only.
+The one thing a server adds for message requests is a count of the new DMs
+each person started there in the last hour, held in memory, to limit spam.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
@@ -331,7 +334,7 @@ the server IDs of official servers dismissed from the join page
 list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain), the camera resolution and frame rate, the dismissed official
-servers, "Allow DMs from" (`friends_only`), the default display name, the
+servers, "Allow DMs from" (`allow_dms`, and `friends_only` for older apps), the default display name, the
 bio and the servers with a name of their own sync to the person's other
 devices; the chosen microphone, speakers and camera stay on this device.
 `voice.json` also lists the servers this device still has to send a name or

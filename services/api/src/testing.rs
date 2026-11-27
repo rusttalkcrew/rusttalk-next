@@ -19,6 +19,7 @@ pub async fn app(dir: &std::path::Path, people: u8) -> anyhow::Result<App> {
         presence: Default::default(),
         voice: None,
         session_ttl: 3600,
+        dm_starts: Default::default(),
         listing_changed: tokio::sync::watch::channel(()).0,
     };
     for byte in 1..=people {

@@ -112,7 +112,7 @@ impl Home {
                 return;
             }
         };
-        if self.friends.is_request(&peer, self.friends_only()) {
+        if self.dm_sort(&peer) != crate::friends::Sort::Shown {
             return;
         }
         let server = &self.servers[index];
@@ -405,6 +405,8 @@ mod tests {
         settings.theme_mode = if dark { "dark" } else { "light" }.into();
         // Quiet: a test may ring.
         settings.call_sounds.volume = 0.01;
+        // Ann isn't a friend: let her DMs in rather than under Message requests.
+        settings.allow_dms = crate::friends::AllowDms::Everyone;
         home.voice.audio.set_settings(settings);
         // Never a real desktop notification from a test.
         let mut prefs = home.notify.prefs().clone();

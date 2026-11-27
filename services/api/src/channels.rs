@@ -918,6 +918,7 @@ mod tests {
             presence: Default::default(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         // Person 1 owns the server; person 2 is a member without any role.
@@ -1086,6 +1087,7 @@ mod tests {
             presence: Default::default(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         // Person 1 owns the server; person 2 is a member without any role.
@@ -1208,6 +1210,7 @@ mod tests {
             presence: Default::default(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         // Person 1 is a Member; person 2 has no role and so no `start_focus`.
@@ -1394,6 +1397,7 @@ mod tests {
             presence: Default::default(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         // Person 1 owns the server; person 2 holds a custom role with Manage channels,
