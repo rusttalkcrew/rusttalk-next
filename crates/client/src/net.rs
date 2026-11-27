@@ -58,13 +58,14 @@ mod files;
 mod find;
 mod phone;
 mod recent;
+pub mod reports;
 mod retry;
 pub mod terminal;
 mod voice;
 
 pub use admin::{
-    Admin, AdminUpdate, AuditEntry, Ban, Delisted, ImportItem, Invite, PublicListing, TakeDown,
-    Takedown, TakenDown,
+    Admin, AdminUpdate, AuditEntry, Ban, Delisted, ImportItem, Invite, PublicListing, ReportAction,
+    TakeDown, Takedown, TakenDown,
 };
 pub use calendar::Change;
 pub use control::{ControlView, Ended};
@@ -174,6 +175,15 @@ pub enum Command {
     Delete(Id, Id, Id, Vec<Id>),
     /// Check that a deleted DM copy (channel, message) is really gone here.
     CheckGone(Id, Id),
+    /// Report a message, and the edit of it that is shown, to the moderators.
+    Report(Box<reports::Outgoing>),
+    /// Who a report of this message (channel, message, from a DM, sender) would go to.
+    ReportRecipients {
+        channel: Id,
+        message: Id,
+        dm: bool,
+        sender: Id,
+    },
     /// Download and decode a picture, as a thumbnail, the full image or a small looping copy.
     Image(BlobRef, Fetch),
     /// Download and read a link preview file.
@@ -461,6 +471,10 @@ pub enum Update {
     /// A new invite: its ID (to revoke it) and link.
     Invite(Url, String, String),
     Admin(Url, AdminUpdate),
+    /// A message report went out, or why it didn't.
+    MessageReported(Result<(), String>),
+    /// Who a report of this message would go to.
+    ReportRecipients(Url, Id, Result<reports::Recipients, String>),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
     /// Whether this device may talk in the call, as LiveKit currently grants it.
@@ -1443,6 +1457,12 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
                 AdminUpdate::Failed(t!("admin.offline").into()),
             ));
         }
+        // The report dialog waits for this answer.
+        Command::ReportRecipients { message, .. } => ctx.send(Update::ReportRecipients(
+            url.clone(),
+            message,
+            Err(t!("admin.offline").into()),
+        )),
         Command::Calendar(_) => ctx.send(Update::Calendar(
             url.clone(),
             Err(t!("admin.offline").into()),
@@ -3119,6 +3139,16 @@ async fn on_command(
             ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
         Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
+        Command::Report(report) => reports::send(ctx, url, client, state, *report).await,
+        Command::ReportRecipients {
+            channel,
+            message,
+            dm,
+            sender,
+        } => {
+            let asked = (channel, message, dm, sender);
+            reports::look_up(ctx, url, client, state, asked).await;
+        }
         Command::Calendar(change) => calendar::change(ctx, url, client, change).await,
         Command::JoinVoice(channel) => {
             if let Err(error) = rusttalk_core::route::allow_realtime_media("Voice calls") {

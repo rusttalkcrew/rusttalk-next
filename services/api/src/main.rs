@@ -17,6 +17,7 @@ mod metadata;
 mod new_members;
 mod page_files;
 mod presence;
+mod reports;
 mod roles;
 mod slow_mode;
 mod store;
@@ -476,6 +477,12 @@ fn routes(app: App) -> Router {
         .route("/v1/roles/{id}/name", put(roles::rename))
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/bans", get(members::bans))
+        .route("/v1/reports/reviewers", get(reports::list_reviewers))
+        .route("/v1/reports/{id}/resolve", post(reports::resolve))
+        .route(
+            "/v1/reports/from/{person}/dismiss",
+            post(reports::dismiss_from),
+        )
         .route("/v1/audit", get(members::audit_log))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .route("/v1/emoji", get(emoji::list))
@@ -533,6 +540,13 @@ fn routes(app: App) -> Router {
         )
         .merge(
             Router::new()
+                .route("/v1/reports", get(reports::list).post(reports::create))
+                .layer(RequestBodyLimitLayer::new(
+                    rusttalk_core::reports::BODY_LIMIT,
+                )),
+        )
+        .merge(
+            Router::new()
                 .route(
                     "/v1/channels/{id}/messages",
                     get(messages::list).post(messages::create),
@@ -566,7 +580,10 @@ const BUFFERED_BODY_LIMIT: usize = max(
     ),
     max(
         max(files::SHARE_BODY_LIMIT, rusttalk_core::sync::MAX_BODY),
-        max(metadata::IMAGE_BODY_LIMIT, messages::BODY_LIMIT),
+        max(
+            max(metadata::IMAGE_BODY_LIMIT, messages::BODY_LIMIT),
+            rusttalk_core::reports::BODY_LIMIT,
+        ),
     ),
 );
 

@@ -33,7 +33,9 @@ const POST: &str = "# #211 Topaz Forum Post\nby a member";
 const REPLY: &str = "#211 Beryl Forum Reply";
 const SLOW_FIRST: &str = "#660 Jasper First Slow Message";
 const SLOW_EDIT: &str = "#660 Agate Edited Slow Message";
-pub(super) const TEXTS: [&str; 19] = [
+const REPORTED: &str = "#678 Onyx Reported Message";
+const REPORT_NOTE: &str = "#678 Garnet Report Note";
+pub(super) const TEXTS: [&str; 21] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -53,6 +55,8 @@ pub(super) const TEXTS: [&str; 19] = [
     REPLY,
     SLOW_FIRST,
     SLOW_EDIT,
+    REPORTED,
+    REPORT_NOTE,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -430,7 +434,150 @@ pub(super) async fn scenario(
     nsfw(a, b, c, text).await?;
     new_member_rules(a, b, c, text).await?;
     timeouts(a, b, c, text, &category).await?;
+    reports(a, b, c, text).await?;
     Ok((dm, b_message))
+}
+
+/// #678: member C reports A's message to the reviewers (owner A and moderator B), who
+/// verify it against A's signature and read it with the disclosed key alone. B deletes it
+/// through the report; the handling is audited. A's report of C's message stays open, so
+/// the database scan checks that a stored report holds no plaintext.
+async fn reports(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    use rusttalk_core::{
+        client::{AlreadyReported, Visible},
+        reports::{Confirmation, Reason, Resolution},
+    };
+    let a_person = *a.identity.certificate.person_id();
+    let b_person = *b.identity.certificate.person_id();
+    let c_person = *c.identity.certificate.person_id();
+    // What the apps show: A owns the server, B is a moderator.
+    let visible = Visible {
+        owner: Some(a_person),
+        reviewers: [b_person].into(),
+        several_owners: false,
+    };
+
+    let posted = a.send_message(&text.id, &body(REPORTED)).await?;
+    c.sync().await?;
+    // A server listing anyone the app doesn't show as a reviewer is refused before
+    // anything is sealed, and so is a chat shown as a DM that isn't one.
+    let unseen = Visible {
+        reviewers: Default::default(),
+        ..visible.clone()
+    };
+    let refused = (c.report_recipients(&text.id, false, &a_person, &unseen)).await;
+    ensure!(refused.is_err(), "a report went to an unseen reviewer");
+    let as_dm = (c.report_recipients(&text.id, true, &a_person, &visible)).await;
+    ensure!(as_dm.is_err(), "a channel passed as a DM");
+    // C is shown the recipients, then sends to exactly them.
+    let shown = (c.report_recipients(&text.id, false, &a_person, &visible)).await?;
+    ensure!(shown == [a_person, b_person] || shown == [b_person, a_person]);
+    let note = REPORT_NOTE;
+    let harassment = Reason::Harassment;
+    (c.report(
+        &text.id, &posted.id, None, false, harassment, note, &shown, &visible,
+    ))
+    .await?;
+    let again = (c.report(
+        &text.id,
+        &posted.id,
+        None,
+        false,
+        Reason::Spam,
+        "",
+        &shown,
+        &visible,
+    ))
+    .await
+    .err()
+    .context("a second report of one message went through")?;
+    ensure!(again.is::<AlreadyReported>(), "second report: {again:#}");
+    rejected(
+        c.request(Method::GET, "/v1/reports").send().await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    let own = c.send_message(&text.id, &body(TEXT_B)).await?;
+    a.sync().await?;
+    let to = (a.report_recipients(&text.id, false, &c_person, &visible)).await?;
+    (a.report(
+        &text.id,
+        &own.id,
+        None,
+        false,
+        Reason::Spam,
+        "",
+        &to,
+        &visible,
+    ))
+    .await?;
+
+    // Both reviewers open and verify it; both hold the channel key and confirm the
+    // disclosed key too.
+    for list in [a.reports().await?, b.reports().await?] {
+        let report = list
+            .iter()
+            .find(|report| report.message == posted.id)
+            .context("report not listed")?;
+        let checked = (report.content.as_ref()).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        ensure!(report.sender == a_person && report.reporter == c_person && !report.dm);
+        ensure!(checked.body.text == REPORTED && checked.note == REPORT_NOTE);
+        ensure!(checked.reason == Reason::Harassment && !checked.sender_removed);
+        ensure!(checked.confirmation == Confirmation::Matched);
+    }
+    let id = b
+        .reports()
+        .await?
+        .into_iter()
+        .find(|report| report.message == posted.id)
+        .context("report gone")?
+        .id;
+    rejected(
+        b.request(
+            Method::POST,
+            &format!("/v1/reports/{}/resolve", encode(&id)),
+        )
+        .json(&json!({ "action": "kicked" }))
+        .send()
+        .await?,
+        StatusCode::CONFLICT,
+        "action_not_taken",
+    )
+    .await?;
+    b.resolve_report(&id, Resolution::Deleted, &[]).await?;
+    let gone = a.message(&text.id, &posted.id).await.err();
+    ensure!(
+        gone.and_then(|error| error.downcast::<reqwest::Error>().ok())
+            .and_then(|error| error.status())
+            == Some(StatusCode::NOT_FOUND),
+        "reported message still there"
+    );
+    ensure!(
+        !b.reports().await?.iter().any(|report| report.id == id),
+        "resolved report still listed"
+    );
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit.iter().any(|row| row["action"] == "report_resolved"
+            && row["target_person_id"] == encode(&a_person)),
+        "missing report_resolved audit"
+    );
+    println!(
+        "#678 verified reports: sealed to reviewers, verified against the sender's signature, deleted through the report, audited"
+    );
+    Ok(())
 }
 
 /// #664: only a server manager turns on new member rules, which is audited. C, who just

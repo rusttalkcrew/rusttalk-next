@@ -16,6 +16,7 @@ Unreleased under the new version and date.
 - Show the whole call full screen at any time with the new button at the top right of the call.
 - The floating camera self view on phones no longer covers the voice panel or your name in the sidebar.
 - Right-click the mic, sound, camera or screen share button in a call to pick a device, start sharing or set screen share quality.
+- Report a message from its menu, with a reason and an optional note. Moderators with the new "Review reports" permission (for DMs, only the server owner) see it under Server settings → Reports, checked against the sender's signature, and can delete the message, time out, kick, ban or dismiss. The server can't read reports, and nothing besides the reported message and its files is shared.
 
 ## v0.11.0 - 2026-11-27
 

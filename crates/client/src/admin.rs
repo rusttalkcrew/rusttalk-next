@@ -7,6 +7,7 @@ mod file_limits;
 mod history;
 mod new_members;
 mod rate_limits;
+pub(crate) mod reports;
 
 mod import;
 
@@ -46,12 +47,13 @@ const ICON_SIZE: f32 = 80.0;
 const HEADER_ICON: f32 = 40.0;
 
 /// Audit log filters: API action and label.
-fn filters() -> [(&'static str, &'static str); 10] {
+fn filters() -> [(&'static str, &'static str); 11] {
     [
         ("member_banned", t!("audit.filter_bans")),
         ("member_unbanned", t!("audit.filter_unbans")),
         ("member_kicked", t!("audit.filter_kicks")),
         ("member_timed_out", t!("audit.filter_timeouts")),
+        ("report_resolved", t!("audit.filter_reports")),
         ("left", t!("audit.filter_leaves")),
         ("member_roles_changed", t!("audit.filter_roles")),
         ("joined", t!("audit.filter_joins")),
@@ -91,6 +93,8 @@ pub enum Tab {
     Lockdown,
     /// The owner's takedowns: remove content for a legal reason, and the record of it.
     Takedowns,
+    /// Reported messages to review.
+    Reports,
 }
 
 enum MemberAction {
@@ -125,6 +129,9 @@ pub struct Settings {
     /// Newest first; `None` until loaded (owner).
     takedowns: Option<Vec<Takedown>>,
     takedown: takedown::Form,
+    /// The open reports, once loaded.
+    reports: Option<Vec<rusttalk_core::client::ReceivedReport>>,
+    report_confirm: Option<reports::Confirm>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -167,6 +174,7 @@ impl Settings {
         match update {
             AdminUpdate::Bans(bans) => (self.bans, self.bans_loaded) = (bans, true),
             AdminUpdate::Takedowns(list) => self.takedowns = Some(list),
+            AdminUpdate::Reports(list) => self.reports = Some(list),
             AdminUpdate::Audit {
                 entries,
                 older,
@@ -363,6 +371,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
             Tab::Invites
         } else if perms.lock_down {
             Tab::Lockdown
+        } else if perms.review_reports {
+            Tab::Reports
         } else {
             Tab::Files
         };
@@ -398,6 +408,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::Takedowns {
         server.send(Command::Admin(Admin::LoadTakedowns));
     }
+    if tab == Tab::Reports {
+        server.send(Command::Admin(Admin::LoadReports));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -416,6 +429,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         lockdown: None,
         takedowns: None,
         takedown: takedown::Form::default(),
+        reports: None,
+        report_confirm: None,
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -646,6 +661,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     let mut emoji_asked = emoji::Asked::default();
     let mut rename = None;
     let mut batch = Vec::new();
+    let mut save_reported = None;
     let close = {
         let perms = server.dir.perms;
         let page = |id, icon, label, allowed: bool| allowed.then_some(Page { id, icon, label });
@@ -702,6 +718,8 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         perms.lock_down && server.dir.lockdown.is_some(),
                     ),
                     page(Tab::Takedowns, "⚖", t!("takedown.title"), perms.owner),
+                    // Only servers that know reports gave the owner role this.
+                    page(Tab::Reports, "⚑", t!("reports.page"), perms.review_reports),
                     page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit),
                 ],
             ),
@@ -781,6 +799,23 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         }
                     }
                     Tab::Listing => listing_tab(ui, server, settings),
+                    Tab::Reports => match settings.reports.as_deref() {
+                        // A failed load shows its error instead of a spinner.
+                        None => {
+                            loading(ui, settings);
+                            None
+                        }
+                        Some(list) => {
+                            match reports::page(ui, server, list, &mut settings.report_confirm) {
+                                Some(reports::Asked::Request(request)) => Some(request),
+                                Some(reports::Asked::Save(file)) => {
+                                    save_reported = Some(file);
+                                    None
+                                }
+                                None => None,
+                            }
+                        }
+                    },
                     Tab::Lockdown => match &server.dir.lockdown {
                         Some(saved) => {
                             let form = (settings.lockdown)
@@ -836,6 +871,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::RateLimits => Some(Admin::LoadRateLimits),
                 Tab::NewMembers => Some(Admin::LoadNewMembers),
                 Tab::Takedowns => Some(Admin::LoadTakedowns),
+                Tab::Reports => Some(Admin::LoadReports),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
@@ -848,6 +884,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     // Confirmations over the settings window.
     if let Some(asked) = roles::delete_dialog(ctx, server, &mut settings.roles, &settings.message)
         .or_else(|| revoke_dialog(ctx, settings))
+        .or_else(|| reports::confirm_dialog(ctx, &mut settings.report_confirm))
         .or_else(|| {
             let error = (settings.message.as_ref())
                 .filter(|(_, error)| *error)
@@ -901,6 +938,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             Ok(crop) => home.crop = Some(crop),
             Err(problem) => settings.message = Some((problem.into(), true)),
         }
+    }
+    if let Some(file) = save_reported {
+        settings.message = None;
+        home.files.save_as_asked(ctx, &server.address, &file);
     }
     if emoji_asked.zip {
         settings.message = None;
@@ -1396,6 +1437,19 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "new_member_rules_changed" => t!("audit.new_member_rules_changed", actor = actor),
         "listing_changed" if entry.details["enabled"] == true => t!("audit.listed", actor = actor),
         "listing_changed" => t!("audit.unlisted", actor = actor),
+        "reports_dismissed" | "dm_reports_dismissed" => t!(
+            "audit.reports_dismissed",
+            actor = actor,
+            target = target,
+            count = entry.details["reports"].as_i64().unwrap_or_default()
+        ),
+        "report_resolved" | "dm_report_resolved" => match entry.details["resolution"].as_str() {
+            Some("dismissed") => t!("audit.report_dismissed", actor = actor, target = target),
+            Some("deleted") => t!("audit.report_deleted", actor = actor, target = target),
+            Some("timed_out") => t!("audit.report_timed_out", actor = actor, target = target),
+            Some("kicked") => t!("audit.report_kicked", actor = actor, target = target),
+            _ => t!("audit.report_banned", actor = actor, target = target),
+        },
         "lockdown_started" => t!("audit.lockdown_started", actor = actor),
         "lockdown_ended" => t!("audit.lockdown_ended", actor = actor),
         "lockdown_message_changed" => t!("audit.lockdown_message_changed", actor = actor),

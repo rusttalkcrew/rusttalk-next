@@ -444,6 +444,8 @@ pub struct Perms {
     pub lock_down: bool,
     /// When banning, also remove what the person posted lately.
     pub remove_recent_messages: bool,
+    /// Read and act on reports of messages outside DMs.
+    pub review_reports: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
     /// "View server as" is on: these are a preview, and nothing may be changed.

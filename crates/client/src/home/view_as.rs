@@ -84,6 +84,7 @@ pub fn preview(real: &Directory, roles: &[String]) -> Directory {
         timeout_members: mine.timeout_members && grants("timeout_members"),
         lock_down: mine.lock_down && grants("lock_down"),
         remove_recent_messages: mine.remove_recent_messages && grants("remove_recent_messages"),
+        review_reports: mine.review_reports && grants("review_reports"),
         rank: (roles.iter().map(|role| role.rank).max())
             .unwrap_or(-1)
             .min(mine.rank),

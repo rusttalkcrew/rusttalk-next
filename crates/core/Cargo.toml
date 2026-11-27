@@ -11,6 +11,8 @@ async-trait = { version = "0.1", optional = true }
 base64 = "0.22"
 boringtun = { version = "0.7.1", default-features = false, optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+# HChaCha20, so a report can disclose one message's XChaCha20 subkey (chacha20poly1305 uses it already).
+chacha20 = { version = "0.10", default-features = false, features = ["xchacha"] }
 hpke = { version = "0.15.1", default-features = false, features = ["alloc", "chacha", "x25519"] }
 bip39 = { version = "3", features = ["zeroize"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
