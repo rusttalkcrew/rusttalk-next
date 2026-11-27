@@ -187,6 +187,7 @@ impl Settings {
             }
             AdminUpdate::AuditFailed(text) => self.audit_error = Some(text),
             AdminUpdate::Stats(update) => self.stats.apply(update),
+            AdminUpdate::StatsHistory(update) => self.stats.apply_history(update),
             AdminUpdate::Invites(invites) => (self.invites, self.invites_loaded) = (invites, true),
             AdminUpdate::Joining(open, cap) => {
                 if !self.joining_unsaved() {

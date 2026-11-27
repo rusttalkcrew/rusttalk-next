@@ -329,6 +329,7 @@ async fn serve(app: App) -> io::Result<()> {
         tracing::error!(reason = error.code, "scheduling timeout ends failed");
     }
     let sampler = tokio::spawn(stats::sample(app.stats.clone()));
+    let recorder = tokio::spawn(stats::history::record(app.clone()));
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     // A host that lowered RUSTTALK_MESSAGE_RETAIN gets its channels trimmed now.
@@ -357,6 +358,7 @@ async fn serve(app: App) -> io::Result<()> {
     let result = axum::serve(listener, app).await;
     expiry.abort();
     sampler.abort();
+    recorder.abort();
     publisher.abort();
     file_expiry.abort();
     result
@@ -487,6 +489,7 @@ fn routes(app: App) -> Router {
         .route("/v1/bans", get(members::bans))
         .route("/v1/audit", get(members::audit_log))
         .route("/v1/stats", get(stats::show))
+        .route("/v1/stats/history", get(stats::history))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .route("/v1/emoji", get(emoji::list))
         .route("/v1/emoji/packs", post(emoji::add_pack))

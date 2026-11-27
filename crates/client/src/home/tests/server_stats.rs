@@ -3,9 +3,13 @@
 
 use super::*;
 use crate::net::{Admin, AdminUpdate};
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{Queryable, by},
+};
 use rusttalk_core::auth::{
-    ServerStats, StatsDirection, StatsPeak, StatsStorage, StatsTraffic, StatsVoice,
+    ServerStats, StatsDirection, StatsHistory, StatsPeak, StatsPoint, StatsStorage, StatsTraffic,
+    StatsVoice,
 };
 
 type Sent = tokio::sync::mpsc::UnboundedReceiver<Command>;
@@ -183,6 +187,85 @@ fn people_allowed_see_the_numbers_and_they_refresh() {
             assert!(h.query_by_label_contains("Server unreachable").is_some());
             assert!(h.query_all_by_label_contains("4567").next().is_some());
         }
+    }
+}
+
+fn history(range: i64) -> StatsHistory {
+    let step = range / 60;
+    let end = crate::notify::unix_now();
+    let points = (1..=60)
+        .map(|i: i64| StatsPoint {
+            at: end - range + i * step,
+            received_per_sec: (i != 1).then_some((40_000 + (i * 7919) % 30_000) as u64),
+            sent_per_sec: (i != 1).then_some((90_000 + (i * 104_729) % 50_000) as u64),
+            connected: (8 + i % 5) as u64,
+            // LiveKit didn't answer for a while.
+            voice: (!(20..25).contains(&i)).then_some((3 + i % 3) as u64),
+        })
+        .collect();
+    StatsHistory {
+        range,
+        step,
+        points,
+    }
+}
+
+fn histories_asked(sent: &mut Sent) -> Vec<i64> {
+    std::iter::from_fn(|| sent.try_recv().ok())
+        .filter_map(|command| match command {
+            Command::Admin(Admin::LoadStatsHistory(range)) => Some(range),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn history_shows_and_follows_the_picked_range() {
+    let screenshots = std::env::var("RUSTTALK_TEST_SCREENSHOTS").ok();
+    for dark in [true, false] {
+        let (mut h, mut sent) = screen(Vec2::new(1100.0, 700.0), dark, true);
+        apply(&mut h, Ok(stats()));
+        h.run_steps(4);
+        // An hour first, asked once the numbers are in.
+        assert_eq!(histories_asked(&mut sent), [3600]);
+        {
+            let (home, _, _) = h.state_mut().as_mut().unwrap();
+            let settings = home.server_settings.as_mut().unwrap();
+            settings.apply(AdminUpdate::StatsHistory(Ok(history(3600))));
+        }
+        h.run_steps(4);
+        if let Some(link) = h.query_all_by_label(t!("admin.stats_history")).next() {
+            link.click();
+        }
+        h.run_steps(8);
+        let traffic = t!("admin.stats_traffic_chart").to_uppercase();
+        assert!(h.query_all_by_label_contains(&traffic).next().is_some());
+        assert!(
+            h.query_by_label_contains(t!("admin.stats_history_help"))
+                .is_some()
+        );
+        if let Some(dir) = &screenshots {
+            let theme = if dark { "dark" } else { "light" };
+            h.render()
+                .unwrap()
+                .save(format!("{dir}/server-stats-history-{theme}.png"))
+                .unwrap();
+        }
+        // Another range is asked for at once, and the old lines go.
+        let five = by()
+            .role(egui::accesskit::Role::RadioButton)
+            .label(t!("admin.stats_range_5_min"));
+        h.get(five).click();
+        h.run_steps(4);
+        assert_eq!(histories_asked(&mut sent), [300]);
+        // A late answer for the hour is ignored.
+        {
+            let (home, _, _) = h.state_mut().as_mut().unwrap();
+            let settings = home.server_settings.as_mut().unwrap();
+            settings.apply(AdminUpdate::StatsHistory(Ok(history(3600))));
+        }
+        h.run_steps(4);
+        assert!(h.query_all_by_label_contains(&traffic).next().is_none());
     }
 }
 

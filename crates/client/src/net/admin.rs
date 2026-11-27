@@ -5,7 +5,7 @@ use reqwest::Method;
 use rusttalk_core::{
     auth::{
         FileLimits, FileSettings, MessageHistory, NewMemberRules, RateLimitPreset, RateLimits,
-        ServerStats, ServerUpdates, decode, encode,
+        ServerStats, ServerUpdates, StatsHistory, decode, encode,
     },
     client::KeyClient,
     keys::{Metadata, random_key},
@@ -85,6 +85,8 @@ pub enum Admin {
     SaveRateLimits(RateLimitPreset),
     /// The server statistics, as they are now.
     LoadStats,
+    /// The statistics over the last this many seconds.
+    LoadStatsHistory(i64),
     LoadNewMembers,
     /// How long the new member rules last after joining, in seconds; 0 is off.
     SaveNewMembers(i64),
@@ -244,6 +246,7 @@ pub enum AdminUpdate {
     NewMembers(Option<NewMemberRules>),
     /// The server statistics, or why they could not be loaded.
     Stats(Result<ServerStats, String>),
+    StatsHistory(Result<StatsHistory, String>),
     /// Whether the server is listed, the saved details, and whether the directory
     /// removed it.
     Listing(bool, Option<PublicListing>, Option<Delisted>),
@@ -478,6 +481,15 @@ async fn change(
                 serde_json::from_value(value).map_err(|_| t!("admin.stats_unavailable").to_owned())
             });
             send(AdminUpdate::Stats(stats));
+            return None;
+        }
+        Admin::LoadStatsHistory(range) => {
+            let path = format!("/v1/stats/history?range={range}");
+            let history = get(client, &path).await.map_err(|error| failed(&error));
+            let history = history.and_then(|value| {
+                serde_json::from_value(value).map_err(|_| t!("admin.stats_unavailable").to_owned())
+            });
+            send(AdminUpdate::StatsHistory(history));
             return None;
         }
         Admin::LoadTakedowns => {

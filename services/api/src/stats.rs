@@ -1,5 +1,7 @@
 //! Server statistics (#214): counts and sizes only, never content, names or addresses.
 
+pub mod history;
+
 use std::{
     io,
     path::{Path, PathBuf},
@@ -12,8 +14,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{Json, extract::State, http::HeaderMap, serve::Listener};
-use rusttalk_core::auth::{ServerStats, StatsDirection, StatsPeak, StatsStorage, StatsTraffic};
+use axum::{
+    Json,
+    extract::{Query, State, rejection::QueryRejection},
+    http::HeaderMap,
+    serve::Listener,
+};
+use rusttalk_core::auth::{
+    ServerStats, StatsDirection, StatsHistory, StatsPeak, StatsStorage, StatsTraffic,
+};
+use serde::Deserialize;
 use sqlx::query_scalar;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -21,7 +31,7 @@ use tokio::{
 };
 
 use crate::{
-    ApiResult, App,
+    ApiError, ApiResult, App,
     auth::authenticate_read,
     roles::{self, Permission},
     store,
@@ -43,6 +53,7 @@ pub struct Stats {
     rate: Mutex<(u64, u64)>,
     /// The database's write-ahead log, which `page_count` leaves out.
     wal: Option<PathBuf>,
+    pub history: history::History,
 }
 
 impl Default for Stats {
@@ -57,6 +68,7 @@ impl Default for Stats {
             peak: Mutex::new((0, 0)),
             rate: Mutex::new((0, 0)),
             wal: None,
+            history: Default::default(),
         }
     }
 }
@@ -67,6 +79,11 @@ impl Stats {
             wal: Some(dir.join(store::DATABASE).with_extension("sqlite3-wal")),
             ..Self::default()
         }
+    }
+
+    /// Bytes received and sent on the API's connections since start.
+    pub fn totals(&self) -> (u64, u64) {
+        (self.received.load(Relaxed), self.sent.load(Relaxed))
     }
 
     pub fn signed_in(&self) {
@@ -234,6 +251,32 @@ pub async fn show(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     }))
 }
 
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    range: i64,
+}
+
+/// `GET /v1/stats/history?range=`: one of `history::RANGES`, in seconds.
+pub async fn history(
+    State(app): State<App>,
+    headers: HeaderMap,
+    query: Result<Query<HistoryQuery>, QueryRejection>,
+) -> ApiResult<Json<StatsHistory>> {
+    let range = query
+        .map_err(|_| ApiError::bad_request("invalid_range"))?
+        .0
+        .range;
+    if !history::RANGES.contains(&range) {
+        return Err(ApiError::bad_request("invalid_range"));
+    }
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
+    roles::authority(&mut tx, &actor.person)
+        .await?
+        .require(Permission::ViewServerStats)?;
+    tx.commit().await?;
+    Ok(Json(app.stats.history.series(range, store::now()?)))
+}
+
 async fn file_size(path: &Path) -> u64 {
     tokio::fs::metadata(path).await.map_or(0, |meta| meta.len())
 }
@@ -291,6 +334,27 @@ mod tests {
         }
         // Unknown sessions get nothing either.
         assert_eq!(shown(9).await.unwrap_err().code, "invalid_session");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn history_takes_a_known_range_and_the_permission() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let asked = |who: u8, query: &str| {
+            let app = app.clone();
+            let query = Query::try_from_uri(&format!("/v1/stats/history?{query}").parse().unwrap());
+            async move { history(State(app), as_person(who), query).await }
+        };
+        let series = asked(1, "range=3600").await?.0;
+        assert_eq!((series.range, series.step), (3600, 60));
+        for bad in ["range=60", "range=-300", "range=lots", ""] {
+            assert_eq!(asked(1, bad).await.unwrap_err().code, "invalid_range");
+        }
+        assert_eq!(
+            asked(2, "range=300").await.unwrap_err().code,
+            "permission_denied"
+        );
         Ok(())
     }
 

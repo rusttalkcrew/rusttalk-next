@@ -188,6 +188,30 @@ pub struct ServerStats {
     pub voice: Option<StatsVoice>,
 }
 
+/// Server statistics over time (`GET /v1/stats/history?range=`), oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsHistory {
+    /// Seconds back from now: 300, 3600, 21600 or 86400.
+    pub range: i64,
+    /// Seconds each point covers.
+    pub step: i64,
+    /// Steps with no record, such as before the server started, are left out.
+    pub points: Vec<StatsPoint>,
+}
+
+/// One step: average traffic per second in it (API and LiveKit), and the most people.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsPoint {
+    /// The end of the step, Unix seconds.
+    pub at: i64,
+    /// `None` for a step with no earlier point to compare with.
+    pub received_per_sec: Option<u64>,
+    pub sent_per_sec: Option<u64>,
+    pub connected: u64,
+    /// `None` while LiveKit didn't answer.
+    pub voice: Option<u64>,
+}
+
 /// People in voice channels and their unmuted streams.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsVoice {
