@@ -318,6 +318,7 @@ mod tests {
             audio_kbps: 0,
             member_limit: 0,
             slow_mode_secs: 0,
+            nsfw: false,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 3)).collect(),
         }

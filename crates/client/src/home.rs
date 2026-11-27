@@ -115,6 +115,7 @@ pub mod layout;
 mod markdown;
 pub mod mentions;
 pub(crate) mod new_members;
+pub(crate) mod nsfw;
 pub mod person;
 mod pokes;
 pub mod polls;
@@ -141,6 +142,8 @@ pub struct Home {
     friends_tab: friends::Tab,
     /// Pokes received and sent; kept on this device only.
     pokes: crate::pokes::Pokes,
+    /// NSFW channels this device agreed to see; kept on this device only.
+    nsfw_agreed: nsfw::Agreed,
     /// The pop-up for the newest poke.
     popup: Option<pokes::Popup>,
     /// Requests to join a voice channel that ring here, and this person's own.
@@ -304,6 +307,8 @@ enum Dialog {
         limit: Option<(u32, bool)>,
         /// Text and forum channels only: slow mode seconds (0 for off), and whether changed.
         slow: Option<(u32, bool)>,
+        /// Text, forum and page channels only: marked NSFW, and whether changed.
+        nsfw: Option<(bool, bool)>,
         /// Role flags changed on the Permissions tab, sent with Save.
         flags: Vec<(String, u8)>,
     },
@@ -436,6 +441,7 @@ impl Home {
             friends,
             friends_tab: friends::Tab::default(),
             pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
+            nsfw_agreed: nsfw::Agreed::open(data_dir.join("nsfw_agreed.json")),
             popup: None,
             requests: Default::default(),
             dm_deleted,
@@ -911,7 +917,9 @@ impl Home {
             return Vec::new();
         }
         match self.view {
+            // Behind the NSFW warning nothing is read yet.
             View::Server(index) => (self.servers[index].open)
+                .filter(|channel| !self.nsfw_warns(index, channel))
                 .map(|channel| (index, channel))
                 .into_iter()
                 .collect(),
@@ -1189,6 +1197,7 @@ impl Home {
                     limit: channel.voice.then_some((channel.member_limit, false)),
                     slow: (!channel.voice && !channel.page)
                         .then_some((channel.slow_mode_secs, false)),
+                    nsfw: (!channel.voice).then_some((channel.nsfw, false)),
                     flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
@@ -3309,7 +3318,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         (true, true) => call::JOIN_SLOT + call::COUNT_SLOT,
                         (true, false) => call::JOIN_SLOT,
                         _ => 0.0,
-                    } + if focus { focus::badge_room(ui) } else { 0.0 };
+                    } + if focus { focus::badge_room(ui) } else { 0.0 }
+                        + if channel.nsfw {
+                            nsfw::badge_room(ui)
+                        } else {
+                            0.0
+                        };
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
@@ -3321,6 +3335,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let lock = if locked { ui::NAV_LOCK_WIDTH } else { 0.0 };
                     if focus {
                         focus::badge(ui, row.rect, &channel.name, selected, trailing + lock);
+                    }
+                    if channel.nsfw {
+                        nsfw::row_badge(ui, row.rect, &channel.name, selected, trailing + lock);
                     }
                     let chats = [(&server.address, channel.id)];
                     let marks = row.rect.with_max_x(row.rect.right() - trailing - lock);
@@ -4598,6 +4615,11 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         home.servers[index].open = None;
         return;
     }
+    // Nothing is loaded or shown until this device continues past the warning.
+    if home.nsfw_warns(index, &channel) {
+        nsfw::warning(ui, home, index, channel);
+        return;
+    }
     let server = &mut home.servers[index];
     let mut chat = server.chats.remove(&channel).unwrap_or_default();
     // A membership notice can arrive before anyone has opened this channel.
@@ -4670,9 +4692,15 @@ fn channel_title(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         let title = server
             .channel(&channel)
             .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
+        let nsfw = server.is_nsfw(&channel);
         let in_server = matches!(home.view, View::Server(_));
         let layout = in_server.then_some(&mut home.layout);
-        pane_title(ui, "chat-title", &title, layout, Some(channel));
+        pane_title_with(ui, "chat-title", &title, Some(channel), |ui| {
+            if let Some(layout) = layout {
+                layout::members_button(ui, layout);
+            }
+            nsfw::header_badge(ui, nsfw);
+        });
     }
 }
 
@@ -4768,13 +4796,14 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
     let can_edit = server.can_write(&channel) && !server.dir.perms.preview;
     let online = server.status == Status::Online;
-    pane_title(
-        ui,
-        "chat-title",
-        &title,
-        in_server.then_some(&mut home.layout),
-        Some(channel),
-    );
+    let nsfw = server.is_nsfw(&channel);
+    let members = in_server.then_some(&mut home.layout);
+    pane_title_with(ui, "chat-title", &title, Some(channel), |ui| {
+        if let Some(layout) = members {
+            layout::members_button(ui, layout);
+        }
+        nsfw::header_badge(ui, nsfw);
+    });
     toast_line(ui, &mut home.toast);
     let Home {
         servers,
@@ -5197,12 +5226,17 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<fr
             At::Dm(_) => None,
         }
         .map_or(0, |channel| channel.slow_mode_secs);
+        let nsfw = match at {
+            At::Channel(index, channel) => servers[index].is_nsfw(&channel),
+            At::Dm(_) => false,
+        };
         let members = in_server.then_some(&mut *layout);
         pane_title_with(ui, "chat-title", &title, files, |ui| {
             if let Some(layout) = members {
                 layout::members_button(ui, layout);
             }
             slow_mode::header_icon(ui, slow);
+            nsfw::header_badge(ui, nsfw);
         });
     }
     let act = friends::dm_card(ui, relation, request, &name);
@@ -7493,6 +7527,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             audio,
             limit,
             slow,
+            nsfw,
             flags,
         } => {
             let data = &home.servers[*server];
@@ -7564,6 +7599,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     if let Some((secs, changed)) = slow {
                         *changed |= slow_mode::picker(ui, secs);
                     }
+                    if let Some((on, changed)) = nsfw {
+                        *changed |= nsfw::toggle(ui, on);
+                    }
                     entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => {
@@ -7590,7 +7628,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 let member_limit = limit.and_then(|(most, changed)| changed.then_some(most));
                 let slow_mode_secs = slow.and_then(|(secs, changed)| changed.then_some(secs));
                 let voice_changed = audio_kbps.is_some() || member_limit.is_some();
-                let settings_changed = voice_changed || slow_mode_secs.is_some();
+                let nsfw = nsfw.and_then(|(on, changed)| changed.then_some(on));
+                let settings_changed = voice_changed || slow_mode_secs.is_some() || nsfw.is_some();
                 if name.trim() != channel.name || *topic_changed || settings_changed {
                     command = Some((
                         *server,
@@ -7601,6 +7640,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             audio_kbps,
                             member_limit,
                             slow_mode_secs,
+                            nsfw,
                         },
                     ));
                 }
@@ -8161,6 +8201,7 @@ mod tests {
     mod message_requests;
     mod message_spacing;
     mod new_members;
+    mod nsfw;
     mod outbox;
     mod presence;
     mod rail;
@@ -8240,6 +8281,7 @@ mod tests {
                 audio_kbps: 0,
                 member_limit: 0,
                 slow_mode_secs: 0,
+                nsfw: false,
                 focus_until: None,
                 flags: vec![("member".into(), 3)],
             }],
@@ -8527,6 +8569,7 @@ mod tests {
             audio_kbps: 64,
             member_limit: 0,
             slow_mode_secs: 0,
+            nsfw: false,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 15)).collect(),
         };

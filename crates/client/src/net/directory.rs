@@ -76,6 +76,7 @@ pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) 
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn rename_channel(
     client: &KeyClient<'_>,
     id: &Id,
@@ -84,6 +85,7 @@ pub(super) async fn rename_channel(
     audio_kbps: Option<u32>,
     member_limit: Option<u32>,
     slow_mode_secs: Option<u32>,
+    nsfw: Option<bool>,
 ) -> Result<()> {
     // The update also replaces category and position. Read them just before saving.
     let catalog = client.catalog().await?;
@@ -114,6 +116,9 @@ pub(super) async fn rename_channel(
     }
     if let Some(secs) = slow_mode_secs {
         body["slow_mode_secs"] = secs.into();
+    }
+    if let Some(nsfw) = nsfw {
+        body["nsfw"] = nsfw.into();
     }
     client
         .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
@@ -680,6 +685,7 @@ fn build(
             member_limit: channel.member_limit.unwrap_or(0),
             focus_until: channel.focus_until,
             slow_mode_secs: channel.slow_mode_secs.unwrap_or(0),
+            nsfw: channel.nsfw,
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -1209,6 +1215,7 @@ mod tests {
             member_limit: None,
             focus_until: None,
             slow_mode_secs: None,
+            nsfw: false,
             flags: Vec::new(),
         };
         let encrypt =

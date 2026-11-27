@@ -542,12 +542,14 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);
     let slow = server.channel(&channel).map_or(0, |c| c.slow_mode_secs);
+    let nsfw = server.is_nsfw(&channel);
     let members = in_server.then_some(&mut home.layout);
     super::pane_title_with(ui, "chat-title", &title_text, Some(channel), |ui| {
         if let Some(layout) = members {
             super::layout::members_button(ui, layout);
         }
         super::slow_mode::header_icon(ui, slow);
+        super::nsfw::header_badge(ui, nsfw);
     });
     toast_line(ui, &mut home.toast);
     if let Some(out) = (home.sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {

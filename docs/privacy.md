@@ -26,7 +26,7 @@ their expiry) are kept only in memory for at most 60 seconds. For automatic lock
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
-| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), `slow_mode_secs` (how long each member waits between messages in a text channel, 0 for off, plain for the same reason), nullable `dm_first` and `dm_second` (person IDs) |
+| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), `slow_mode_secs` (how long each member waits between messages in a text channel, 0 for off, plain for the same reason), `nsfw` (whether a text, forum or page channel is marked as possibly holding mature content, plain for the same reason, so the server learns which channels their managers marked but nothing about what is in them), nullable `dm_first` and `dm_second` (person IDs) |
 | `channel_ids` | `id` (text, including event IDs and deleted channel IDs to prevent reuse) |
 | `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end), nullable `reminded_at` (Unix seconds) |
 | `calendar_answers` | `event_id`, `person` and `device` (public keys), `certificate` (public device certificate), `epoch`, `envelope` (signed space-key ciphertext of going or not going, always the same size) |
@@ -88,6 +88,9 @@ each person started there in the last hour, held in memory, to limit spam.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
+Which NSFW channels someone agreed to open stays on the device as well
+(`nsfw_agreed.json`, server address and channel ID): it is never synced or
+sent, so neither the server nor this person's other devices learn it.
 Voice requests and their answers are encrypted DM messages too, so servers
 don't learn that a message is one, which channel it names or what the answer
 is. They see a small DM message and its time, which next to someone joining a
@@ -313,7 +316,7 @@ visible when it reconnects. Removing a server clears its files.
 
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
-`saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
+`saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `nsfw_agreed.json`, `dm_pins/`,
 the encrypted recent-view cache, recent and favourite emoji, cached link previews and both local logs. This
 clears the previous person's fingerprint, DM history markers, server records
 and preview consent. Hardware, local sound and window preferences in

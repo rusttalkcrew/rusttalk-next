@@ -49,6 +49,9 @@ pub struct ChannelFields {
     /// Text channels only: seconds between one member's messages, 0 for off. Kept when missing.
     #[serde(default)]
     slow_mode_secs: Option<i64>,
+    /// Text, forum and page channels only: whether it may hold mature content. Kept when missing.
+    #[serde(default)]
+    nsfw: Option<bool>,
 }
 
 /// The slow mode choices apps offer, in seconds; 0 is off.
@@ -84,6 +87,7 @@ struct ChannelRow {
     member_limit: i64,
     focus_until: Option<i64>,
     slow_mode_secs: i64,
+    nsfw: bool,
 }
 
 #[derive(Serialize)]
@@ -106,6 +110,9 @@ pub struct Channel {
     /// While slow mode is on: the seconds between one member's messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     slow_mode_secs: Option<i64>,
+    /// Only while the channel is marked NSFW, so older apps see nothing new.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nsfw: Option<bool>,
     flags: Vec<RoleFlags>,
 }
 
@@ -211,7 +218,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
         "SELECT id, CASE WHEN page THEN 'page' WHEN forum THEN 'forum' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
                 audio_kbps, member_limit, CASE WHEN focus_until > ? THEN focus_until END AS focus_until,
-                slow_mode_secs
+                slow_mode_secs, nsfw
          FROM channels c
          WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
@@ -254,6 +261,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             member_limit,
             focus_until: row.focus_until,
             slow_mode_secs: (row.slow_mode_secs > 0).then_some(row.slow_mode_secs),
+            nsfw: row.nsfw.then_some(true),
             flags,
         });
     }
@@ -468,6 +476,9 @@ pub async fn update_channel(
     if let Some(secs) = fields.slow_mode_secs {
         set_slow_mode(&mut tx, &actor, &id, secs).await?;
     }
+    if let Some(nsfw) = fields.nsfw {
+        set_nsfw(&mut tx, &actor, &id, nsfw).await?;
+    }
     category_exists(&mut tx, &fields.category_id).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let changed = query(
@@ -540,6 +551,34 @@ async fn set_slow_mode(
         None,
         Some(id),
         Some(serde_json::json!({ "before": before, "after": secs })),
+        actor.at,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Mark a text, forum or page channel NSFW or not, and audit it when it changed.
+async fn set_nsfw(db: &mut SqliteConnection, actor: &Actor, id: &str, nsfw: bool) -> ApiResult<()> {
+    let before: bool = query_scalar("SELECT nsfw FROM channels WHERE id = ? AND kind = 'text'")
+        .bind(id)
+        .fetch_optional(&mut *db)
+        .await?
+        .ok_or(ApiError::bad_request("not_a_text_channel"))?;
+    if before == nsfw {
+        return Ok(());
+    }
+    query("UPDATE channels SET nsfw = ? WHERE id = ?")
+        .bind(nsfw)
+        .bind(id)
+        .execute(&mut *db)
+        .await?;
+    audit_details(
+        db,
+        &actor.person,
+        "nsfw_changed",
+        None,
+        Some(id),
+        Some(serde_json::json!({ "before": before, "after": nsfw })),
         actor.at,
     )
     .await?;
@@ -1194,6 +1233,7 @@ mod tests {
                 audio_kbps_max: None,
                 member_limit: None,
                 slow_mode_secs: None,
+                nsfw: None,
             }))
         };
         let stored = || async {
@@ -1584,6 +1624,7 @@ mod tests {
                     audio_kbps_max: None,
                     member_limit: None,
                     slow_mode_secs: None,
+                    nsfw: None,
                 })),
             )
         };
@@ -1648,6 +1689,7 @@ mod tests {
                     audio_kbps_max: None,
                     member_limit: None,
                     slow_mode_secs: Some(secs),
+                    nsfw: None,
                 })),
             )
         };
@@ -1678,6 +1720,91 @@ mod tests {
                 .await?;
         let details = serde_json::json!({ "before": 0, "after": 300 }).to_string();
         assert_eq!(audited, [("slow_mode_changed".into(), id(20), details)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nsfw_is_a_managers_text_channel_flag_and_audited() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = crate::testing::app(dir.path(), 2).await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        for (channel, kind, page) in [
+            (20_u8, "text", false),
+            (21, "voice", false),
+            (22, "text", true),
+        ] {
+            query("INSERT INTO channels (id, kind, page, category_id, position, name_ct) VALUES (?, ?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(page).bind(id(10)).execute(&app.db).await?;
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'owner', 15), (?, 'member', 15)")
+                .bind(id(channel)).bind(id(channel)).execute(&app.db).await?;
+        }
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'member')")
+            .bind(crate::testing::person(2))
+            .execute(&app.db)
+            .await?;
+        let update = |who: u8, channel: u8, nsfw: bool| {
+            update_channel(
+                State(app.clone()),
+                crate::testing::as_person(who),
+                Path(id(channel)),
+                Ok(Json(ChannelFields {
+                    category_id: id(10),
+                    position: 0,
+                    name_ct: String::new(),
+                    topic_ct: None,
+                    audio_kbps: None,
+                    audio_kbps_max: None,
+                    member_limit: None,
+                    slow_mode_secs: None,
+                    nsfw: Some(nsfw),
+                })),
+            )
+        };
+        let code = |result: ApiResult<StatusCode>| result.unwrap_err().code;
+        assert_eq!(code(update(2, 20, true).await), "permission_denied");
+        assert_eq!(code(update(1, 21, true).await), "not_a_text_channel");
+
+        // Saved and audited with what changed; saving the same value again logs nothing.
+        // Pages may be marked too; only marked channels say so in the list.
+        let mut tx = app.db.begin().await?;
+        let owner = crate::auth::Actor {
+            person: [1; 32],
+            device: vec![1],
+            ip: "192.0.2.1".into(),
+            at: 50,
+            session_id: vec![1],
+            expires_at: i64::MAX,
+        };
+        set_nsfw(&mut tx, &owner, &id(20), true).await?;
+        set_nsfw(&mut tx, &owner, &id(20), true).await?;
+        set_nsfw(&mut tx, &owner, &id(22), true).await?;
+        set_nsfw(&mut tx, &owner, &id(22), false).await?;
+        let listed = channels(&mut tx, Some(crate::testing::person(1).as_slice())).await?;
+        let shown: Vec<_> = listed.iter().map(|c| c.nsfw).collect();
+        assert_eq!(shown, [Some(true), None, None]);
+        let json = serde_json::to_value(&listed)?;
+        assert!(
+            json[1].get("nsfw").is_none(),
+            "unmarked channels leave it out"
+        );
+        let audited: Vec<(String, String, String)> =
+            query_as("SELECT action, target_id, details FROM audit_log ORDER BY rowid")
+                .fetch_all(&mut *tx)
+                .await?;
+        let details = |before: bool, after: bool| {
+            serde_json::json!({ "before": before, "after": after }).to_string()
+        };
+        assert_eq!(
+            audited,
+            [
+                ("nsfw_changed".into(), id(20), details(false, true)),
+                ("nsfw_changed".into(), id(22), details(false, true)),
+                ("nsfw_changed".into(), id(22), details(true, false)),
+            ]
+        );
         Ok(())
     }
 }

@@ -1414,6 +1414,17 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
                 .and_then(|id| server.channel(&id))
                 .map_or_else(|| t!("audit.a_channel").into(), |c| format!("#{}", c.name))
         ),
+        "nsfw_changed" => {
+            let channel = entry
+                .target_id
+                .and_then(|id| server.channel(&id))
+                .map_or_else(|| t!("audit.a_channel").into(), |c| format!("#{}", c.name));
+            if entry.details["after"] == true {
+                t!("audit.nsfw_on", actor = actor, channel = channel)
+            } else {
+                t!("audit.nsfw_off", actor = actor, channel = channel)
+            }
+        }
         "category_created" => t!("audit.category_created", actor = actor),
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),

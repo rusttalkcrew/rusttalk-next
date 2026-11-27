@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Channel managers can mark a channel NSFW. It shows an NSFW badge, and the first time you open it on a device you are asked whether to continue; your answer is remembered on that device only.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.
