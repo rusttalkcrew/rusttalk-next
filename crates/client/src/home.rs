@@ -2380,10 +2380,22 @@ pub fn show(
     call::remote::sharer(ui, home);
     call::terminal::prompt(ui.ctx(), home);
     call::diagram::prompt(ui.ctx(), home);
-    if home.voice.stage.full.is_some() {
+    // The whole call view full screen, while in the call.
+    let whole = home.voice.call.as_ref().and_then(|call| {
+        let index = home.servers.iter().position(|s| s.address == call.server)?;
+        Some((index, call.channel))
+    });
+    if whole.is_none() {
+        home.voice.stage.whole = false;
+    }
+    let whole = whole.filter(|_| home.voice.stage.whole && home.voice.stage.full.is_none());
+    if home.voice.stage.full.is_some() || whole.is_some() {
         CentralPanel::default()
             .frame(panel_frame(colors.main))
-            .show(ui, |ui| call::full_view(ui, home));
+            .show(ui, |ui| match whole {
+                Some((index, channel)) => whole_call(ui, home, index, channel),
+                None => call::full_view(ui, home),
+            });
         call::phone_self_view(ui.ctx(), home);
         // What the call's buttons there open.
         call::screen_dialog(ui.ctx(), home);
@@ -4680,6 +4692,15 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     home.layout.split_dragging = divider
         .is_some_and(|divider| layout::split_divider(ui, divider, area, &mut home.layout.split));
     ui.allocate_rect(area, Sense::hover());
+}
+
+/// The call view covering the window, with the call's buttons floating over its
+/// bottom while the pointer moves, as in a full-screen tile.
+fn whole_call(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
+    let area = ui.available_rect_before_wrap();
+    let mut stage = ui.new_child(UiBuilder::new().max_rect(area));
+    call::stage(&mut stage, home, index, channel);
+    call::whole_controls(ui, home, area);
 }
 
 /// Where a queued message goes: a channel by its server's address, or a DM.

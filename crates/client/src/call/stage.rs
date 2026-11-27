@@ -85,6 +85,8 @@ pub struct Stage {
     presenting: bool,
     /// Covers the whole window.
     pub full: Option<Tile>,
+    /// The whole call view covers the window, tiles and all.
+    pub whole: bool,
     /// When full screen shows its controls.
     chrome: Chrome,
 }
@@ -659,10 +661,22 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
 
     let mut acts = Vec::new();
-    // The toolbar, top right.
+    // Escape leaves the whole view full screen, after any menu or dialog over it.
+    let covered = Popup::is_any_open(&ctx) || ctx.memory(|m| m.top_modal_layer().is_some());
+    if stage.whole
+        && !covered
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        stage.whole = false;
+    }
+    // The toolbar, top right; full screen only while in this call.
+    let tools = if joined { 3.0 } else { 2.0 };
     let bar = Rect::from_min_size(
-        pos2(rect.right() - GAP - 2.0 * TOOL.x - 4.0, rect.top() + GAP),
-        vec2(2.0 * TOOL.x + 4.0, TOOL.y),
+        pos2(
+            rect.right() - GAP - tools * (TOOL.x + 4.0) + 4.0,
+            rect.top() + GAP,
+        ),
+        vec2(tools * (TOOL.x + 4.0) - 4.0, TOOL.y),
     );
     ui.scope_builder(
         UiBuilder::new()
@@ -671,6 +685,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let on = Look::On(ui::accent(ui).base);
+            if joined {
+                let (tip, look) = if stage.whole {
+                    (t!("call.exit_full_screen"), on)
+                } else {
+                    (t!("call.full_screen"), Look::Plain)
+                };
+                if ui::icon_button(ui, "⛶", tip, look, TOOL).clicked() {
+                    stage.whole ^= true;
+                }
+            }
             let (tip, look) = if stage.presenting {
                 (t!("call.leave_presentation"), on)
             } else {
@@ -1924,6 +1948,51 @@ fn panel<R>(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui) -> R) -> R {
     );
     child.spacing_mut().item_spacing.x = ui::SPACE_XS;
     add(&mut child)
+}
+
+/// The call's buttons floating over the whole call in full screen, as over a full-screen
+/// tile: shown when the pointer moves (a tap on phones), gone when idle.
+pub fn whole_controls(ui: &mut Ui, home: &mut Home, rect: Rect) {
+    let ctx = ui.ctx().clone();
+    let now = ui.input(|input| input.time);
+    let covered = Popup::is_any_open(&ctx) || ctx.memory(|m| m.top_modal_layer().is_some());
+    let (touch, moved, pointer, pressed) = ui.input(|input| {
+        let touch = input.any_touches()
+            || (input.events.iter()).any(|event| matches!(event, egui::Event::Touch { .. }));
+        let moved = !touch && input.pointer.delta() != Vec2::ZERO;
+        let pressed = input.pointer.any_pressed();
+        (touch, moved, input.pointer.hover_pos(), pressed)
+    });
+    let keyboard = ui.input(|input| input.key_pressed(Key::Tab));
+    let chrome = &mut home.voice.stage.chrome;
+    let over = chrome.over(pointer);
+    let tapped = touch && pressed && !over;
+    let visible = chrome.update(now, moved || keyboard, tapped, covered || over);
+    if visible {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(chrome.left(now)));
+    }
+    let fade = ctx.animate_bool_with_time(
+        UiId::unique("whole call controls"),
+        visible,
+        ui::STATE_SECONDS,
+    );
+    let mut panels = Vec::new();
+    if fade > 0.0 {
+        let mut overlay_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+        overlay_ui.multiply_opacity(fade);
+        let count = super::panel::phone_control_count(home);
+        let width = panel_width(count).min(rect.width() - 2.0 * GAP);
+        let height = FULL_TOOL.y + 2.0 * ui::SPACE_XS;
+        let bottom = Rect::from_center_size(
+            pos2(rect.center().x, rect.bottom() - GAP - height / 2.0),
+            vec2(width, height),
+        );
+        panels.push(bottom);
+        panel(&mut overlay_ui, bottom, |ui| {
+            super::panel::phone_controls(ui, home)
+        });
+    }
+    home.voice.stage.chrome.panels = panels;
 }
 
 /// A camera, screen or terminal covering the whole window. Its name, its own buttons

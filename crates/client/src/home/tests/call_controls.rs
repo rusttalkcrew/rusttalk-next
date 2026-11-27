@@ -428,3 +428,52 @@ fn call_notification_buttons_work_without_a_frame() {
     assert!(!notice::press(Button::HangUp as i32), "out of a call");
     assert!(sent().is_empty());
 }
+
+/// The call view's full-screen button covers the window with the whole call, also
+/// with nobody sharing; the button again or Escape leaves, and the call goes on.
+#[test]
+fn the_whole_call_goes_full_screen() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            let mut h = in_call(dark, size, data.path());
+            assert!(
+                h.query_by_label(t!("call.voice_connected")).is_some() || home(&h).layout.phone
+            );
+            h.get_by_label(t!("call.full_screen")).click();
+            h.run_steps(3);
+            assert!(home(&h).voice.stage.whole);
+            // Only the call: no sidebar, no chat, and the way back.
+            assert!(h.query_by_label(t!("call.voice_connected")).is_none());
+            assert!(h.query_by_label(t!("layout.hide_chat")).is_none());
+            assert!(h.query_by_label(t!("call.exit_full_screen")).is_some());
+            // The call's buttons float over the bottom, and hide when idle.
+            let leave = h.get_by_label(t!("call.leave")).rect();
+            assert!(leave.bottom() > size.y - 80.0, "{size:?}: {leave:?}");
+            capture(&mut h, size, dark, "whole");
+            for _ in 0..2 {
+                h.input_mut().time = Some(1000.0);
+                h.step();
+            }
+            assert!(h.query_by_label(t!("call.leave")).is_none(), "{size:?}");
+            capture(&mut h, size, dark, "whole-idle");
+            h.hover_at(egui::pos2(size.x / 2.0, size.y / 2.0));
+            for _ in 0..2 {
+                h.input_mut().time = Some(1000.5);
+                h.step();
+            }
+            assert!(h.query_by_label(t!("call.leave")).is_some(), "{size:?}");
+
+            h.key_press(egui::Key::Escape);
+            h.run_steps(3);
+            assert!(!home(&h).voice.stage.whole);
+            assert!(home(&h).voice.call.is_some());
+
+            h.get_by_label(t!("call.full_screen")).click();
+            h.run_steps(3);
+            h.get_by_label(t!("call.exit_full_screen")).click();
+            h.run_steps(3);
+            assert!(!home(&h).voice.stage.whole);
+        }
+    }
+}
