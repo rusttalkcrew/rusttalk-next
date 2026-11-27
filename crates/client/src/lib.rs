@@ -50,6 +50,7 @@ mod profile;
 mod reorder;
 mod route;
 mod screen;
+mod sensitive;
 mod server;
 mod settings;
 mod share;
@@ -112,6 +113,16 @@ fn android_main(app: Android) {
 
 pub fn main() -> ExitCode {
     start(None)
+}
+
+/// The picture check's model, for its time and memory test (tests/sensitive_model.rs).
+#[doc(hidden)]
+pub use sensitive::{THRESHOLD as SENSITIVE_THRESHOLD, model as sensitive_model};
+
+/// `make sensitive-check DIR=<folder>`: the picture check's scores for a local folder.
+#[doc(hidden)]
+pub fn sensitive_check(dir: Option<std::ffi::OsString>) -> ExitCode {
+    sensitive::check_folder(dir)
 }
 
 fn start(android: Option<Android>) -> ExitCode {

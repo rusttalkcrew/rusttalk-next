@@ -24,10 +24,11 @@ use rusttalk_core::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqliteConnection, SqlitePool, query, query_as, query_scalar};
 use tokio::{
     fs,
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{Semaphore, SemaphorePermit},
     time,
 };
@@ -599,7 +600,26 @@ impl Files {
         }
     }
 
-    async fn remove(&self, db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+    /// SHA-256 of a stored file's ciphertext, for a takedown record; `None` if it is no
+    /// longer on disk.
+    pub(crate) async fn digest(&self, id: &str) -> ApiResult<Option<[u8; 32]>> {
+        let mut file = match fs::File::open(self.dir.join(id)).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(disk_error(error)),
+        };
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).await.map_err(disk_error)?;
+            if read == 0 {
+                return Ok(Some(hasher.finalize().into()));
+            }
+            hasher.update(&buffer[..read]);
+        }
+    }
+
+    pub(crate) async fn remove(&self, db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
         if self.unlink(id).await? {
             self.sync_dir().await?;
         }

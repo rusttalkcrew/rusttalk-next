@@ -103,6 +103,11 @@ test: ## Run unit and integration tests
 	cargo test $(CARGO_SCOPE) --locked
 	PATH="$(OPENSSL_PATH)$$PATH" python3 -m unittest discover -s deploy/updater
 
+.PHONY: sensitive-check
+sensitive-check: ## Print the sensitive picture check's scores for DIR=<folder>; local only, uploads nothing
+	@test -n "$(DIR)" || { echo "usage: make sensitive-check DIR=<folder>"; exit 2; }
+	cargo run --release --locked -p rusttalk-client --example sensitive_check -- "$(DIR)"
+
 .PHONY: android-camera-test
 android-camera-test: ## Run deterministic Android camera lifecycle tests (JDK, no device)
 	@set -eu; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
@@ -115,6 +120,7 @@ e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$ RUSTTALK_INDEX_TTL_SECONDS=8; \
+		export RUSTTALK_INDEX_ADMIN_TOKEN=$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n') RUSTTALK_INDEX_CONTACT=directory@example.org; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
 		export RUSTTALK_E2E_DB=$$(mktemp -d /dev/shm/rusttalk-e2e.XXXXXX); \
 		for stack in "$$RUSTTALK_E2E_PROJECT" "$$RUSTTALK_E2E_PROJECT-second"; do \

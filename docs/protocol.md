@@ -134,6 +134,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip, can_lift}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?, remove_secs?}`, default false and none | `ban`. 204. `remove_secs` (3600, 86400 or 604800, otherwise `400 invalid_remove_window`) also needs `remove_recent_messages`: the server deletes the person's messages sent in that many seconds before the ban from every non-DM channel, by sender and time without reading them, and expires the files they uploaded then (except files the newest version of a page keeps), which cleanup unlinks right away. Audited as `recent_messages_removed` with `{secs, messages, files}`. Readers get a `message_deleted` per message, or one `resync` when more than 200 went |
 | DELETE `/v1/bans/{person}` | Empty | `ban` and may lift it (see below). 204 |
+| POST `/v1/takedowns` | `{ids, reason, notice?, ban?}` | Owner only (`403 owner_required`). 201, the record as below. Removes the messages and stored files named in `ids` (1 to 64 base64url IDs, each looked up as either; unknown ones are left out), also in DMs, with the files a removed page version keeps, from the database, the file store, shared-file lists and page references; then checkpoints the WAL. The app sends a message with its edits and every file and thumbnail they carry. `reason` (1 to 1000 characters) and `notice` (up to 200, such as a case number) are the owner's own plain text. `ban` also bans the one account that posted everything (`409 takedown_several_authors` when there are more), as `PUT /v1/bans` would. Readers get a `message_deleted` per message. Audited as `content_taken_down` (target: the author when there is one, `target_id`: the record ID, details `{messages, files, banned}`, never the reason) and, with `ban`, `member_banned`. Otherwise `400 invalid_takedown`, `400 invalid_takedown_reason`, `400 invalid_takedown_notice` or `404 takedown_not_found`. Servers can also call it from other tools, such as reports |
+| GET `/v1/takedowns` | Empty | Owner only. 200, every takedown newest first: `{id, at, actor, reason, notice?, banned?, items: [{kind, id, channel, author, size, sha256?}]}`, `kind` `message` or `file`, `sha256` the hex SHA-256 of the removed ciphertext (missing for a file already gone from disk). Older servers answer 404 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
 | POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
 | PUT `/v1/roles/{id}` | `{permissions, name_ct?, rank?}` | `manage_roles`. 204, replaces a custom role's flags and, when given, its name and rank (1 to 999, below the caller's) |
@@ -307,12 +309,12 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_timeout`, `invalid_member_limit`, `invalid_slow_mode`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `not_a_text_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint`, `invalid_remove_window`, `invalid_lockdown_message`, `invalid_auto_lockdown` |
+| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_timeout`, `invalid_member_limit`, `invalid_slow_mode`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `not_a_text_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint`, `invalid_remove_window`, `invalid_lockdown_message`, `invalid_auto_lockdown`, `invalid_takedown`, `invalid_takedown_reason`, `invalid_takedown_notice` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `server_locked`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full`, `timed_out`, `new_member_rules` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `timeout_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `timeout_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found`, `takedown_not_found` |
 | 408 | `file_upload_timeout`, `body_timeout` (a change body must arrive within 30 s; file uploads have their own limits) |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon`, `takedown_several_authors` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit`, `new_dm_limit`, `slow_mode`, `rate_limited` (all with a `Retry-After` header and `retry_after`, both in seconds) |
@@ -540,7 +542,7 @@ any category; the body may be up to 64 KiB. A repeated ID returns
 | GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
 | GET `/v1/channels` | Empty | `manage_channels`. 200, the channels the caller can read (the Owner reads all) |
 | POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
-| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, audio_kbps_max?, member_limit?, slow_mode_secs?}` | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204. `audio_kbps` (voice channels only, 8 to 320, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. Audio is sent in mono, which Opus caps at about 256 kbps, so higher values sound the same; above 128 clients also turn off discontinuous transmission (DTX) so quiet music isn't cut. `audio_kbps_max` is the highest bitrate the sending app offers (320 now; absent means 128, as in apps up to v0.6.0, whose slider stops there). When `audio_kbps` equals that maximum and the stored bitrate is higher, the stored bitrate stays: such an app clamped it and resends the clamped value when its manager saves another field. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one. `slow_mode_secs` (text and forum channels only, one of 0, 5, 10, 30, 60, 300, 900, 3600 or 21600, 0 = off, default 0; otherwise `400 invalid_slow_mode`, or `400 not_a_text_channel` for voice channels and pages) is how long each member waits between messages there; when absent it stays as it was. A change is audited as `slow_mode_changed` with `{before, after}`. The catalog and channel list return it as `slow_mode_secs` while it is on |
+| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, audio_kbps_max?, member_limit?, slow_mode_secs?, nsfw?}` | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204. `audio_kbps` (voice channels only, 8 to 320, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. Audio is sent in mono, which Opus caps at about 256 kbps, so higher values sound the same; above 128 clients also turn off discontinuous transmission (DTX) so quiet music isn't cut. `audio_kbps_max` is the highest bitrate the sending app offers (320 now; absent means 128, as in apps up to v0.6.0, whose slider stops there). When `audio_kbps` equals that maximum and the stored bitrate is higher, the stored bitrate stays: such an app clamped it and resends the clamped value when its manager saves another field. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one. `slow_mode_secs` (text and forum channels only, one of 0, 5, 10, 30, 60, 300, 900, 3600 or 21600, 0 = off, default 0; otherwise `400 invalid_slow_mode`, or `400 not_a_text_channel` for voice channels and pages) is how long each member waits between messages there; when absent it stays as it was. A change is audited as `slow_mode_changed` with `{before, after}`. The catalog and channel list return it as `slow_mode_secs` while it is on. `nsfw` (text, forum and page channels only, `true` or `false`, default `false`; otherwise `400 not_a_text_channel`) marks a channel as possibly holding mature content; when absent it stays as it was. A change is audited as `nsfw_changed` with `{before, after}`. The catalog and channel list return `nsfw: true` while it is marked and leave it out otherwise. Apps warn once per device before opening such a channel and keep the answer on the device |
 | DELETE `/v1/channels/{id}` | Empty | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204 |
 | PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels`, read access to the channel (otherwise `404 channel_not_found`) and a lower-ranked target role. The Owner can also change the Owner role. 204 |
 | PUT `/v1/channels/{id}/focus` | `{seconds}` | `start_focus` and read access to a voice channel (other channels it can read: `400 not_a_voice_channel`). 204. Turns focus mode on until `seconds` (1 to 86,400) from now, or off with 0; anything else is `400 invalid_focus_time`. The catalog and channel list return the end as `focus_until` (Unix seconds) while it is in the future. A change sends `channel_changed`; the end itself sends nothing, clients compare it with their clock |
@@ -1571,6 +1573,16 @@ returns the same record fields as a message page, and
 `/v1/channels/{channel}/message-devices` also finds senders of shared files.
 Apps refresh the list when it is opened; no event announces changes.
 
+#### Sensitive media
+
+A sender marks a stored picture or video as sensitive by appending the media
+type parameter `;sensitive` to its media type, as in `image/jpeg;sensitive`.
+The media type is already inside the encrypted, signed message and limited to
+127 bytes, so the format, its size limit and the API are unchanged. A media type
+with no room left for the parameter is sent unmarked. Apps that know the mark
+blur the file until it is tapped. Older apps read the type before the `;`, or go
+by the file name, and show the file as before.
+
 #### Link previews
 
 A sender may attach a preview of one link in the message text as an ordinary
@@ -1744,6 +1756,15 @@ The API registers again every hour and retries after five minutes when a
 registration fails. It logs failures with a short reason and, when the index
 rejects the registration, the index's error code.
 
+When the index answers `403 server_delisted`, the API keeps the operator's
+`reason` and `contact` (each dropped unless it is plain, bounded text),
+sealed like the listing, and GET adds them until a later registration
+succeeds or the owner turns listing off:
+`"delisted": {"reason": "Spam links", "contact": "abuse@example.org"}`.
+Both fields are optional and `delisted` is absent while the server is
+listed. A removed server retries only at the hourly refresh. PUT does not
+accept `delisted`.
+
 Send `{"enabled":false}` to clear the configured publication and stop renewals.
 The existing listing remains visible until its lease expires. Changing the
 directory URL also lets the old lease expire. Public text is supplied
@@ -1752,13 +1773,15 @@ reports the server's current open joining setting.
 
 ### Index HTTP API
 
-The index uses its own HTTPS base URL and no bearer token.
+The index uses its own HTTPS base URL. Only the operator's admin API takes
+a bearer token.
 
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
 | GET `/v1/servers?q=&page=1` | Optional literal search string and one-based page | 200, array of up to 25 listing objects |
 | POST `/v1/servers` | `{listing, timestamp, signature}` | 204, accepts or refreshes a listing |
+| POST `/v1/servers/{server_id}/reports` | `{reason, note}` | 204, report kept for the operator |
 
 A listing is `{server_id, name, description, address, member_count,
 open_joining}`. The name must contain a non-whitespace character and
@@ -1803,3 +1826,41 @@ that server ID. Expiry is three hours from acceptance. Registration allows
 `503 index_full` when a new server ID would exceed the index's listing cap
 (refreshes of an existing listing are still accepted). Invalid search
 parameters return `400 invalid_query`.
+
+A registration from a server the operator removed gets
+`403 {"error":"server_delisted","reason":"…","contact":"…"}` after its
+signature checks out, so only that server learns the reason. `contact` is
+the operator's `RUSTTALK_INDEX_CONTACT`, or null.
+
+#### Reports
+
+Anyone may report a listed server. `reason` is one of `spam`, `scam`,
+`harassment`, `illegal` or `other`; the optional `note` has at most 500
+scalar values, with line breaks and tabs but no other control or hidden
+characters (as for descriptions). The index stores the reason, note, time
+and a copy of the listing's name and address, and nothing about the sender.
+Reports allow five per ten minutes per IPv4 address or IPv6 /64. Errors:
+`400 invalid_server_id`, `400 invalid_report`, `404 unknown_server` (not
+listed), `429 report_limit` and `503 reports_full` (10,000 open reports).
+
+#### Operator admin API
+
+Off unless `RUSTTALK_INDEX_ADMIN_TOKEN` is set (at least 32 characters);
+then every route needs `Authorization: Bearer <token>` and answers
+`401 admin_token_required` without it. While off, they answer
+`404 admin_disabled`. GET `/v1/admin/` serves a small page that uses them.
+
+| Method and path | Request | Success |
+| --- | --- | --- |
+| GET `/v1/admin/reports` | Empty | 200, `{reports, sanctions}`: the newest 500 reports and every removed server |
+| PUT `/v1/admin/servers/{server_id}` | `{action, reason, address?}` | 204, removes the server now and refuses it from then on |
+| DELETE `/v1/admin/servers/{server_id}` | Empty | 204, lets it list again (`404 not_removed` if it wasn't) |
+| DELETE `/v1/admin/servers/{server_id}/reports` | Empty | 204, dismisses its reports |
+
+`action` is `delist` (refuses that server ID) or `block` (also refuses any
+server ID at the same host, whatever its port, and removes their listings
+now). A block takes the host from `address`, else the current listing, else
+the newest report; `400 address_required` when none is known. `reason` is
+one line of at most 500 scalar values and is shown to the server's owner.
+Removing a server settles its reports. Invalid bodies get
+`400 invalid_sanction`.

@@ -405,6 +405,178 @@ mod tests {
         assert_eq!(bucket.take(0.0, RATE, start), Err(Duration::from_secs(6)));
     }
 
+    /// How often and how long the app waits out a 429: an upload (`client/files.rs`), and
+    /// a message or shared-file record (`Pacing` in the app).
+    const UPLOAD: (u32, Duration) = (5, Duration::from_secs(15));
+    const PACED: (u32, Duration) = (5, Duration::from_secs(10));
+    const NO_WAIT: (u32, Duration) = (0, Duration::ZERO);
+    const MB: f64 = 1e6;
+
+    /// One member's app against the buckets `Limits` keeps (as `request`, `upload` and
+    /// `uploaded` use them), in simulated time.
+    struct Member {
+        buckets: Buckets,
+        preset: RateLimitPreset,
+        start: Instant,
+        now: Instant,
+        /// Bytes a second the upload link carries.
+        link: f64,
+        /// The longest wait the server asked for.
+        longest: Duration,
+    }
+
+    impl Member {
+        fn new(preset: RateLimitPreset, link: f64) -> Self {
+            let now = Instant::now();
+            Self {
+                buckets: Buckets::default(),
+                preset,
+                start: now,
+                now,
+                link,
+                longest: Duration::ZERO,
+            }
+        }
+
+        fn check(&mut self, upload: bool) -> Result<(), Duration> {
+            let (preset, now, person) = (self.preset, self.now, [1; 32]);
+            let session = rate(preset, None);
+            let per_ip = Rate {
+                burst: session.burst * PER_IP,
+                per_sec: session.per_sec * PER_IP,
+            };
+            let buckets = &mut self.buckets;
+            buckets.take(Key::Session(vec![1]), 1.0, session, now)?;
+            buckets.take(Key::Ip("192.0.2.1".into()), 1.0, per_ip, now)?;
+            if upload {
+                let count = rate(preset, Some(Action::Upload));
+                buckets.take(Key::Person(person, Action::Upload), 1.0, count, now)?;
+                let bytes = rate(preset, Some(Action::UploadBytes));
+                buckets.take(Key::Person(person, Action::UploadBytes), 0.0, bytes, now)?;
+            }
+            Ok(())
+        }
+
+        /// One request taking a few milliseconds, waiting out a 429 for its whole-second
+        /// Retry-After as `patience` allows.
+        fn send(&mut self, upload: bool, (tries, longest): (u32, Duration)) -> Result<()> {
+            let mut tried = 0;
+            loop {
+                self.now += Duration::from_millis(2);
+                let Err(wait) = self.check(upload) else {
+                    return Ok(());
+                };
+                let wait = Duration::from_secs_f64(wait.as_secs_f64().ceil().max(1.0));
+                self.longest = self.longest.max(wait);
+                anyhow::ensure!(
+                    tried < tries && wait <= longest,
+                    "refused after {tried} tries, asked to wait {wait:?}"
+                );
+                tried += 1;
+                self.now += wait;
+            }
+        }
+
+        /// One blob: checked, sent, counted, and authenticated again before it is kept.
+        fn upload(&mut self, bytes: f64) -> Result<()> {
+            self.send(true, UPLOAD)?;
+            self.sent(bytes);
+            self.send(false, UPLOAD)
+        }
+
+        /// A blob sent at the link's speed and counted, as `Limits::uploaded` does.
+        fn sent(&mut self, bytes: f64) {
+            self.now += Duration::from_secs_f64(bytes / self.link);
+            let (rate, now) = (rate(self.preset, Some(Action::UploadBytes)), self.now);
+            let key = Key::Person([1; 32], Action::UploadBytes);
+            (self.buckets.buckets.entry(key))
+                .or_insert_with(|| Bucket::new(rate, now))
+                .spend(bytes, rate, now);
+        }
+
+        /// A message of `photos` pictures of `size` bytes, each with its thumbnail.
+        fn album(&mut self, photos: usize, size: f64) -> Result<()> {
+            for _ in 0..photos {
+                self.upload(size)?;
+                self.upload(30e3)?;
+            }
+            self.send(false, PACED)
+        }
+
+        /// The e2e files step's flood: the chat steps before it spend most of the
+        /// session's burst, then 500 tiny files are shared as fast as they go.
+        fn e2e_shares(&mut self, share: (u32, Duration)) -> Result<()> {
+            for _ in 0..300 {
+                self.send(false, PACED)?;
+            }
+            self.preset = RateLimitPreset::Relaxed;
+            for _ in 0..500 {
+                self.upload(16.0)?;
+                self.send(false, share)?;
+            }
+            Ok(())
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.now - self.start
+        }
+    }
+
+    #[test]
+    fn hundreds_of_quick_shares_reach_the_session_ceiling_which_asks_for_a_second() {
+        // The e2e flake: a shared-file record refused with 429 was given up on at once.
+        let mut before = Member::new(RateLimitPreset::Standard, 100.0 * MB);
+        let refused = before.e2e_shares(NO_WAIT).unwrap_err();
+        assert!(refused.to_string().contains("1s"), "{refused}");
+        // Waiting it out, as uploads and messages already did, gets them all through.
+        let mut after = Member::new(RateLimitPreset::Standard, 100.0 * MB);
+        after.e2e_shares(PACED).unwrap();
+        assert_eq!(after.longest, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn albums_of_large_photos_never_ask_for_a_wait_the_app_gives_up_on() -> Result<()> {
+        use RateLimitPreset::*;
+        // A fast home line and a gigabit one, which spends the byte budget fastest.
+        for (preset, link) in [
+            (Standard, 12.5 * MB),
+            (Standard, 125.0 * MB),
+            (Strict, 125.0 * MB),
+        ] {
+            let mut member = Member::new(preset, link);
+            for _ in 0..3 {
+                member.album(10, 5.0 * MB)?;
+            }
+            // Then the phone sends its own ten.
+            member.album(10, 12.0 * MB)?;
+            assert!(
+                member.longest <= Duration::from_secs(1),
+                "{preset:?} {link}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_script_uploading_without_end_is_held_to_the_byte_rate() -> Result<()> {
+        let mut script = Member::new(RateLimitPreset::Standard, 1000.0 * MB);
+        let file = 32.0 * MIB;
+        // A patient script: whatever it is asked to wait, it waits.
+        let patient = (u32::MAX, Duration::MAX);
+        for _ in 0..64 {
+            script.send(true, patient)?;
+            script.sent(file);
+        }
+        // 2 GiB: the first 512 MiB at once, the rest (but the last file) at 2 MiB a second.
+        let paid = (64.0 * file - 512.0 * MIB - file) / (2.0 * MIB);
+        assert!(
+            script.elapsed().as_secs_f64() >= paid,
+            "{:?}",
+            script.elapsed()
+        );
+        Ok(())
+    }
+
     #[test]
     fn full_buckets_and_old_warnings_are_swept() {
         let start = Instant::now();
@@ -535,12 +707,21 @@ mod tests {
         let mut app = app(dir.path(), 2).await?;
         limited(&mut app, Some(RateLimitPreset::Strict));
         let burst = rate(RateLimitPreset::Strict, None).burst as usize;
-        for _ in 0..burst {
-            drop(authenticate_read(&app, &as_person(2)).await?);
-        }
-        let Err(refused) = authenticate_read(&app, &as_person(2)).await else {
-            panic!("the session ceiling holds");
+        // The bucket refills while the loop runs (slow CI machines more so), so allow some
+        // slack past the burst, but the ceiling must still hold.
+        let mut allowed = 0;
+        let refused = loop {
+            match authenticate_read(&app, &as_person(2)).await {
+                Ok(read) => drop(read),
+                Err(refused) => break refused,
+            }
+            allowed += 1;
+            assert!(allowed <= burst * 2, "the session ceiling holds");
         };
+        assert!(
+            allowed >= burst,
+            "the whole burst is allowed: {allowed} < {burst}"
+        );
         assert_eq!(refused.code, "rate_limited");
         // Another person's session has its own.
         drop(authenticate_read(&app, &as_person(1)).await?);

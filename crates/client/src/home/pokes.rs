@@ -48,6 +48,7 @@ impl Home {
                 edit_of: None,
                 revision: 0,
                 files: Vec::new(),
+                sensitive: false,
                 keep: Vec::new(),
                 sticker: None,
                 friend: None,

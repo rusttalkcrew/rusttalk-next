@@ -20,13 +20,15 @@ their expiry) are kept only in memory for at most 60 seconds. For automatic lock
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id`, `banned_at` (Unix seconds), nullable `banned_by` (person ID of the member who placed it, also in the audit log) and `banned_by_rank` (their highest role rank then, so only the owner, they or someone who outranks them can lift it) |
+| `takedowns` | `id` (sequence), `at` (Unix seconds), `actor_person_id` (the owner), `reason` and nullable `notice` (**plain text**: the owner's own words for why, and a notice's reference such as a case number; see [Takedowns](#takedowns)), nullable `banned_person_id` (the account banned in the same step) |
+| `takedown_items` | `takedown_id`, `kind` (message or file), `item_id`, `channel_id`, `author_person_id`, `size` (bytes of ciphertext), nullable `sha256` (SHA-256 of the removed ciphertext; never the plaintext or a key) |
 | `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility), nullable `details` (JSON of what changed: role IDs, permission flags, file-limit numbers, the names of changed server fields and whether the server is listed; never names or other content) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
-| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), `slow_mode_secs` (how long each member waits between messages in a text channel, 0 for off, plain for the same reason), nullable `dm_first` and `dm_second` (person IDs) |
+| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), `slow_mode_secs` (how long each member waits between messages in a text channel, 0 for off, plain for the same reason), `nsfw` (whether a text, forum or page channel is marked as possibly holding mature content, plain for the same reason, so the server learns which channels their managers marked but nothing about what is in them), nullable `dm_first` and `dm_second` (person IDs) |
 | `channel_ids` | `id` (text, including event IDs and deleted channel IDs to prevent reuse) |
 | `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end), nullable `reminded_at` (Unix seconds) |
 | `calendar_answers` | `event_id`, `person` and `device` (public keys), `certificate` (public device certificate), `epoch`, `envelope` (signed space-key ciphertext of going or not going, always the same size) |
@@ -88,6 +90,9 @@ each person started there in the last hour, held in memory, to limit spam.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
+Which NSFW channels someone agreed to open stays on the device as well
+(`nsfw_agreed.json`, server address and channel ID): it is never synced or
+sent, so neither the server nor this person's other devices learn it.
 Voice requests and their answers are encrypted DM messages too, so servers
 don't learn that a message is one, which channel it names or what the answer
 is. They see a small DM message and its time, which next to someone joining a
@@ -159,6 +164,17 @@ members' identities or signatures. It uses source IPs in memory for
 registration rate limits, clears them each minute, and does not retain
 search terms. Expired entries stop appearing in results immediately and
 are later pruned from SQLite.
+
+A report on a listed server stores its reason, optional note, time and a
+copy of the listing's public name and address, but no reporter identity or
+address; the reporter's IP is held in memory for the ten-minute report rate
+limit only. Reports are deleted when the operator acts on or dismisses them.
+A removed server's ID, reason, time and (for a block) host are kept until the
+operator restores it. When the index refuses a removed server, the API keeps
+the operator's reason and contact sealed with a key derived from the server
+key, like the listing, and shows them only to the owner. The "Report"
+button contacts the same directory as "Find servers", and only when a report
+is sent.
 
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
@@ -283,6 +299,26 @@ complete file to the path chosen by the user.
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.
 
+### Takedowns
+
+When the server's owner removes content for a legal reason (Server settings >
+Takedowns, or "Remove content" on a message), the server deletes the messages
+and files they name everywhere it keeps them: the message rows, the file on
+disk, the shared-file list and a page's kept files. Deleted database rows are
+overwritten with zeros (`secure_delete`) and the WAL is checkpointed and
+truncated afterwards, so the ciphertext doesn't stay in free pages or the log.
+The server keeps a record of each takedown: IDs, authors, sizes and a SHA-256
+of each removed ciphertext, when, by whom, and whether the author was banned.
+It never keeps the content or a key, so the record alone can't show what was
+said. The owner's **reason and notice reference are stored in plain text**:
+they are operational notes the owner writes, like a moderator's audit entry,
+not member content, and the owner may need to hand them to the authorities
+without a device. The app asks the owner to describe the content without
+copying it. Records are listed only to the owner and are never deleted by
+the server. Copies outside the server (members' devices, other servers
+holding a DM copy, the operator's own backups) are not touched; see
+[docs/operators.md](operators.md).
+
 ## What the desktop client stores
 
 The device signing secret, device agreement secret, sync key, person ID and
@@ -313,7 +349,7 @@ visible when it reconnects. Removing a server clears its files.
 
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
-`saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
+`saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `nsfw_agreed.json`, `dm_pins/`,
 the encrypted recent-view cache, recent and favourite emoji, cached link previews and both local logs. This
 clears the previous person's fingerprint, DM history markers, server records
 and preview consent. Hardware, local sound and window preferences in
@@ -404,6 +440,25 @@ when the person selects **Download**, from a fixed upstream commit (see
 Outbound connections), and the client checks its size and pinned SHA-256
 before saving it and again every time it loads it. A file that fails the check
 is deleted and never used; the normal noise suppression keeps working.
+
+### Sensitive media
+
+A sender can mark a message's pictures and videos as sensitive. The mark is a
+`;sensitive` parameter on the file's media type inside the encrypted message
+(see protocol.md, Sensitive media), so servers can't see it. Other apps blur
+those pictures until someone taps them.
+
+"Detect and blur automatically" (Settings → Privacy → Sensitive media, on by
+default) runs a small picture model that ships inside the app (MobileNetV2, MIT,
+see `crates/client/assets/sensitive/README.md`). It runs on a background thread
+on this device, only on thumbnails about to be shown, once per picture. Results
+are kept in memory only, are never written to disk and are never sent anywhere.
+The app downloads nothing for it and reports nothing; the model only blurs
+pictures on this screen.
+
+`sensitive.json` in the profile folder keeps the pictures this person blurred or
+showed from a picture's menu, by stored file ID. The "Sensitive media" choices
+are kept in `voice.json`. Both stay on this device and are never synced.
 
 ## Outbound connections
 

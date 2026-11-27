@@ -190,6 +190,8 @@ pub struct Settings {
     /// Share my microphone with phone calls others bring into my voice channel,
     /// without asking each time. Off by default. This device only, never synced.
     pub phone_always_share: bool,
+    /// "Sensitive media" in Privacy: what shows blurred. This device only, never synced.
+    pub sensitive: crate::sensitive::Prefs,
 }
 
 impl Settings {
@@ -270,6 +272,7 @@ impl Default for Settings {
             phone: Default::default(),
             phone_contacts: Vec::new(),
             phone_always_share: false,
+            sensitive: Default::default(),
         }
     }
 }

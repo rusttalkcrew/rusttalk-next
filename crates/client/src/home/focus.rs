@@ -72,31 +72,47 @@ fn badge_font() -> FontId {
     FontId::new(ui::TEXT_CAPTION - 1.0, ui::bold_family())
 }
 
-/// The "Focus" badge's size, as `ui::badge` draws it.
-fn badge_size(ui: &Ui) -> Vec2 {
-    let text = t!("focus.badge").to_owned();
+/// A badge's size with `text`, as `ui::badge` draws it.
+fn badge_size(ui: &Ui, text: &str) -> Vec2 {
     let galley = ui
         .painter()
-        .layout_no_wrap(text, badge_font(), Color32::WHITE);
+        .layout_no_wrap(text.to_owned(), badge_font(), Color32::WHITE);
     galley.size() + Vec2::new(10.0, 2.0)
 }
 
 /// The room the "Focus" badge takes after a channel's name.
 pub fn badge_room(ui: &Ui) -> f32 {
-    badge_size(ui).x + ui::SPACE_S
+    row_badge_room(ui, t!("focus.badge"))
 }
 
-/// The "Focus" badge right after `name` in a channel `row` drawn by
+/// The room a badge with `text` takes after a channel's name.
+pub fn row_badge_room(ui: &Ui, text: &str) -> f32 {
+    badge_size(ui, text).x + ui::SPACE_S
+}
+
+/// Where a badge with `text` goes right after `name` in a channel `row` drawn by
 /// `ui::nav_row_trailing`, which kept `trailing` points free (the badge's room included).
-pub fn badge(ui: &mut Ui, row: Rect, name: &str, selected: bool, trailing: f32) {
+pub fn row_badge_rect(
+    ui: &Ui,
+    row: Rect,
+    name: &str,
+    selected: bool,
+    trailing: f32,
+    text: &str,
+) -> Rect {
     let font = FontId::new(ui::TEXT_BODY, crate::emoji::family(selected));
     let name = ui
         .painter()
         .layout_no_wrap(name.to_owned(), font, Color32::WHITE);
-    let size = badge_size(ui);
+    let size = badge_size(ui, text);
     let width = name.size().x.min((row.width() - 44.0 - trailing).max(0.0));
     let left = row.left() + 34.0 + width + ui::SPACE_S;
-    let rect = Rect::from_min_size(egui::pos2(left, row.center().y - size.y / 2.0), size);
+    Rect::from_min_size(egui::pos2(left, row.center().y - size.y / 2.0), size)
+}
+
+/// The "Focus" badge right after `name` in a channel `row` (see `row_badge_rect`).
+pub fn badge(ui: &mut Ui, row: Rect, name: &str, selected: bool, trailing: f32) {
+    let rect = row_badge_rect(ui, row, name, selected, trailing, t!("focus.badge"));
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(rect)
