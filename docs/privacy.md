@@ -165,6 +165,17 @@ registration rate limits, clears them each minute, and does not retain
 search terms. Expired entries stop appearing in results immediately and
 are later pruned from SQLite.
 
+A report on a listed server stores its reason, optional note, time and a
+copy of the listing's public name and address, but no reporter identity or
+address; the reporter's IP is held in memory for the ten-minute report rate
+limit only. Reports are deleted when the operator acts on or dismisses them.
+A removed server's ID, reason, time and (for a block) host are kept until the
+operator restores it. When the index refuses a removed server, the API keeps
+the operator's reason and contact sealed with a key derived from the server
+key, like the listing, and shows them only to the owner. The "Report"
+button contacts the same directory as "Find servers", and only when a report
+is sent.
+
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission

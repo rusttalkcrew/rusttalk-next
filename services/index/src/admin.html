@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Directory admin</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0 auto; max-width: 960px; padding: 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-bottom: 1px solid #8884; padding: 6px; text-align: left; vertical-align: top; }
+  td { overflow-wrap: anywhere; white-space: pre-wrap; }
+  button { margin: 2px; }
+</style>
+<script src="admin.js" defer></script>
+</head>
+<body>
+<h1>Directory admin</h1>
+<form id="login">
+  <label>Admin token <input id="token" type="password" autocomplete="off" required></label>
+  <button>Load</button>
+</form>
+<p id="status" role="status"></p>
+<h2>Reports</h2>
+<table id="reports">
+  <thead><tr><th>When</th><th>Server</th><th>Reason</th><th>Note</th><th>Actions</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Removed servers</h2>
+<table id="sanctions">
+  <thead><tr><th>When</th><th>Server ID</th><th>Removed as</th><th>Reason</th><th>Actions</th></tr></thead>
+  <tbody></tbody>
+</table>
+</body>
+</html>

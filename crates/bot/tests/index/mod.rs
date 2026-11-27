@@ -8,7 +8,7 @@ use rusttalk_core::{
     pinned_tls::https_client,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{env, time::Duration};
 
 use super::{compose_bytes, rejected};
 
@@ -147,6 +147,106 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
     let connected = Server::probe(found.address.clone(), Some(tls), Some(&found)).await?;
     assert!(connected.known_server() == known);
 
+    // Someone reports the listing; the operator blocks it, the owner sees why, and a
+    // restore lets it back in.
+    let id = &entry.server_id;
+    let report = known
+        .address
+        .join(&format!("index/v1/servers/{id}/reports"))?;
+    let send_report = |body: Value| {
+        index
+            .post(report.clone())
+            .timeout(Duration::from_secs(2))
+            .json(&body)
+            .send()
+    };
+    rejected(
+        send_report(json!({"reason": "rude"})).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_report",
+    )
+    .await?;
+    let response = send_report(json!({"reason": "spam", "note": "W16 report note"})).await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let token = env::var("RUSTTALK_INDEX_ADMIN_TOKEN").context("admin token for the e2e index")?;
+    let admin = |method, path: &str| -> Result<_> {
+        Ok(index
+            .request(
+                method,
+                known.address.join(&format!("index/v1/admin/{path}"))?,
+            )
+            .timeout(Duration::from_secs(2)))
+    };
+    rejected(
+        admin(Method::GET, "reports")?.send().await?,
+        StatusCode::UNAUTHORIZED,
+        "admin_token_required",
+    )
+    .await?;
+    let page = admin(Method::GET, "")?.send().await?.error_for_status()?;
+    assert!(page.headers().contains_key("content-security-policy"));
+    let overview: Value = admin(Method::GET, "reports")?
+        .bearer_auth(&token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let reported = &overview["reports"][0];
+    assert_eq!(reported["server_id"], json!(id));
+    assert_eq!(reported["reason"], "spam");
+    assert_eq!(reported["note"], "W16 report note");
+    let response = admin(Method::PUT, &format!("servers/{id}"))?
+        .bearer_auth(&token)
+        .json(&json!({"action": "block", "reason": "W16 rule test"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(search(&index, &url).await?.is_empty());
+    // Saving again publishes at once; the index refuses it and the API keeps the reason.
+    let response = settings(Method::PUT).json(&enabled).send().await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let state: Value = settings(Method::GET)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if state["delisted"]
+                == json!({"reason": "W16 rule test", "contact": "directory@example.org"})
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .context("waiting for the owner to see the removal")??;
+    let response = admin(Method::DELETE, &format!("servers/{id}"))?
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = settings(Method::PUT).json(&enabled).send().await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while search(&index, &url).await?.is_empty() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("waiting for the restored listing")??;
+    let state: Value = settings(Method::GET)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(state, enabled, "the removal is gone once listed again");
+
     let response = settings(Method::PUT)
         .json(&json!({"enabled": false}))
         .send()
@@ -183,7 +283,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
         }
     }
     println!(
-        "W16 owner published, pinned bot search verified the server ID, open joining reached the listing, disabling let the listing expire, and a forged signature was rejected"
+        "W16 owner published, pinned bot search verified the server ID, open joining reached the listing, a report reached the operator, a block reached the owner with its reason and a restore re-listed it, disabling let the listing expire, and a forged signature was rejected"
     );
     Ok(())
 }

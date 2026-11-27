@@ -34,7 +34,9 @@ use crate::{
         Home, initials,
         person::{self, Person, Pick},
     },
-    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing, Takedown},
+    net::{
+        Admin, AdminUpdate, AuditEntry, Ban, Command, Delisted, Invite, PublicListing, Takedown,
+    },
     server::{Channel, Id, Perms, Server},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
@@ -128,6 +130,8 @@ pub struct Settings {
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
     saved_joining: Option<(bool, u32)>,
     saved_listing: Option<(bool, PublicListing)>,
+    /// The directory removed the server, as it last told the server.
+    delisted: Option<Delisted>,
     /// A Joining or Listing save on its way; it counts as saved once it went through.
     saving: Option<Saving>,
     updates: ServerUpdates,
@@ -203,7 +207,8 @@ impl Settings {
                 Some(form) if form.unsaved() => form.saved(saved),
                 rules => *rules = Some(new_members::Form::new(saved)),
             },
-            AdminUpdate::Listing(on, saved) => {
+            AdminUpdate::Listing(on, saved, delisted) => {
+                self.delisted = delisted;
                 let saved = (on, saved.unwrap_or_default());
                 if !self.listing_unsaved() {
                     self.listing = Some(saved.clone());
@@ -414,6 +419,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         listing: None,
         saved_joining: None,
         saved_listing: None,
+        delisted: None,
         saving: None,
         updates: ServerUpdates::default(),
         member: None,
@@ -1665,6 +1671,14 @@ fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
         t!("admin.listed_off")
     };
     ui::toggle_row(ui, on, t!("admin.list_publicly"), help);
+    ui.hyperlink_to(
+        t!("admin.directory_rules"),
+        crate::official::DIRECTORY_RULES,
+    );
+    ui.add_space(ui::SPACE_S);
+    if let Some(delisted) = settings.delisted.as_ref().filter(|_| *on) {
+        removed_notice(ui, delisted);
+    }
     if !*on {
         return ui::primary(ui, t!("common.save"))
             .clicked()
@@ -1729,6 +1743,29 @@ fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
             None
         }
     }
+}
+
+/// The directory took this server out: why, and whom to ask to undo it.
+fn removed_notice(ui: &mut Ui, delisted: &Delisted) {
+    let c = ui::colors(ui);
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, c.danger))
+        .corner_radius(ui::RADIUS)
+        .inner_margin(egui::Margin::same(ui::SPACE_M as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(ui::bold(t!("admin.delisted_title")).color(c.danger_text));
+            ui.add(egui::Label::new(t!("admin.delisted_help")).wrap());
+            if let Some(reason) = &delisted.reason {
+                ui.add(egui::Label::new(t!("admin.delisted_reason", reason = reason)).wrap());
+            }
+            let appeal = match &delisted.contact {
+                Some(contact) => t!("admin.delisted_contact", contact = contact),
+                None => t!("admin.delisted_no_contact").to_owned(),
+            };
+            ui.add(egui::Label::new(appeal).wrap().selectable(true));
+        });
+    ui.add_space(ui::SPACE_S);
 }
 
 /// The same checks the directory makes, so mistakes show before saving.

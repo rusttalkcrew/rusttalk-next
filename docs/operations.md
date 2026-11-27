@@ -558,6 +558,18 @@ while listed servers keep refreshing. Registration rate limits track at most
 4,096 addresses per minute and refuse new addresses beyond that. Keep system
 clocks synchronized so registrations fall within the one-minute window.
 
+People can report listed servers from "Find servers". To review reports, set
+`RUSTTALK_INDEX_ADMIN_TOKEN` to a random string of at least 32 characters
+(for example `openssl rand -base64 32`) and open `/v1/admin/` on the index
+(`https://<host>/index/v1/admin/` behind the bundled Caddy). The page lists
+reports and removed servers. **Delist** removes a server and refuses its
+server ID; **Block** also refuses every server at the same host; **Restore**
+lets it list again with its next refresh; **Dismiss** closes reports without
+acting. The reason you type is shown to that server's owner, together with
+`RUSTTALK_INDEX_CONTACT` (one line, such as an email address) for appeals.
+Without a token the admin API is off. Publish your rules; the official
+directory uses [docs/directory-rules.md](directory-rules.md).
+
 `make dev` and `make e2e` enable the Compose `index` profile. To run the dev
 Compose stack without a directory, invoke Compose directly and omit the
 profile. The dev directory is available to a local bot at

@@ -16,6 +16,7 @@ Unreleased under the new version and date.
 - Server owners can remove illegal content with "Remove content" on a message or by pasting its ID in Server settings → Takedowns: the message, its edits and its files are deleted from the server, the account can be banned in the same step, and a record without the content is kept.
 - Channel managers can mark a channel NSFW. It shows an NSFW badge, and the first time you open it on a device you are asked whether to continue; your answer is remembered on that device only.
 - Sensitive pictures and videos show blurred until you tap them. Tick "Mark as sensitive" when sending, blur or unblur any picture from its menu, and choose in Settings → Privacy whether marked pictures blur and whether the app spots likely nude pictures on your device.
+- Report a server in Find servers, and see on Public listing when the directory removed your server and why.
 
 ## v0.10.0 - 2026-11-27
 

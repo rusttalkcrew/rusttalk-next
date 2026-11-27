@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rusttalk_core::{
-    auth::{Fingerprint, KnownServer, ProtocolError, decode},
+    auth::{Fingerprint, KnownServer, ProtocolError, decode, encode},
     client::Server as Api,
     index::{Listing, https_url, validate_details},
     pinned_tls::https_client,
@@ -67,6 +67,75 @@ pub(super) async fn search(
     }
     let listings: Vec<Listing> = serde_json::from_slice(&body).map_err(|e| unreachable(&e))?;
     Ok(listings.into_iter().filter_map(listed).collect())
+}
+
+/// Why someone reports a listed server, as the index names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportReason {
+    Spam,
+    Scam,
+    Harassment,
+    Illegal,
+    Other,
+}
+
+impl ReportReason {
+    pub const ALL: [Self; 5] = [
+        Self::Spam,
+        Self::Scam,
+        Self::Harassment,
+        Self::Illegal,
+        Self::Other,
+    ];
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::Spam => "spam",
+            Self::Scam => "scam",
+            Self::Harassment => "harassment",
+            Self::Illegal => "illegal",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Tell the index's operator about a listed server. Only the reason and note are sent.
+pub(super) async fn report(
+    index: &Url,
+    pin: Option<Fingerprint>,
+    server: &[u8; 32],
+    reason: ReportReason,
+    note: &str,
+) -> Result<(), String> {
+    let unreachable = |error: &dyn std::fmt::Display| {
+        tracing::warn!(%error, "reporting a listed server failed");
+        t!("find.unreachable").to_owned()
+    };
+    let mut base = index.clone();
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    let url = base
+        .join(&format!("v1/servers/{}/reports", encode(server)))
+        .map_err(|e| unreachable(&e))?;
+    let client = https_client(pin)
+        .map_err(|e| unreachable(&format_args!("{:#}", anyhow::Error::from_boxed(e))))?;
+    let reply = client
+        .post(url)
+        .json(&serde_json::json!({"reason": reason.code(), "note": note.trim()}))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| unreachable(&e.without_url()))?;
+    match reply.status() {
+        status if status.is_success() => {
+            tracing::info!("listed server reported");
+            Ok(())
+        }
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(t!("find.report_limit").into()),
+        reqwest::StatusCode::NOT_FOUND => Err(t!("find.report_gone").into()),
+        status => Err(unreachable(&status)),
+    }
 }
 
 /// Keep only listings that pass the index's own checks, so a bad index can't show hidden text.

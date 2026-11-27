@@ -60,8 +60,11 @@ fn listing(home: &mut Home) {
         index_url: crate::official::DIRECTORY.into(),
         index_fingerprint: String::new(),
     };
-    (home.server_settings.as_mut().unwrap())
-        .apply(crate::net::AdminUpdate::Listing(true, Some(listing)));
+    (home.server_settings.as_mut().unwrap()).apply(crate::net::AdminUpdate::Listing(
+        true,
+        Some(listing),
+        None,
+    ));
 }
 
 /// Server settings on Roles, with a custom role below this person's.
