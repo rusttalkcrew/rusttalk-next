@@ -100,7 +100,7 @@ struct Group {
 /// this person, nor anyone they blocked.
 fn people(home: &Home) -> Vec<Entry> {
     let me = *home.identity.certificate.person_id();
-    let (dms, requests) = home.friends.split(&home.dm_peers(), home.friends_only());
+    let (dms, requests) = home.dm_split();
     let mut seen: HashSet<Id> = home.servers.iter().map(|s| s.dir.me).collect();
     seen.insert(me);
     let mut people: Vec<Id> = (dms.into_iter().chain(requests))
@@ -175,6 +175,7 @@ fn options() -> Vec<(Tab, &'static str)> {
         (Tab::Profile, t!("settings.your_id")),
         (Tab::Privacy, t!("keys.section")),
         (Tab::Privacy, t!("home.direct_messages")),
+        (Tab::Privacy, t!("friends.blocked_section")),
         (Tab::Privacy, t!("home.member_lists")),
         (Tab::Privacy, t!("previews.section")),
         (Tab::Privacy, t!("home.server_directory")),

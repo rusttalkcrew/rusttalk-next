@@ -53,6 +53,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         forum: false,
         audio_kbps: 64,
         member_limit: 0,
+        slow_mode_secs: 0,
         focus_until: None,
         flags: Vec::new(),
     };
@@ -71,6 +72,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         hide_offline: false,
         bio: None,
         voice_muted: false,
+        timeout_until: None,
     }]
     .into();
     let ann = Peer {

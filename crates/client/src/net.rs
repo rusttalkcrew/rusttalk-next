@@ -205,6 +205,8 @@ pub enum Command {
         audio_kbps: Option<u32>,
         /// Voice channels only: 0 lifts the limit.
         member_limit: Option<u32>,
+        /// Text channels only: 0 turns slow mode off.
+        slow_mode_secs: Option<u32>,
     },
     RenameCategory(Id, String),
     DeleteChannel(Id),
@@ -496,6 +498,8 @@ pub enum Update {
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
+    /// The server asked to slow down: a message to this channel waits (`true`) or went.
+    SlowDown(Url, Id, bool),
     /// A channel's shared files, newest first; empty when loading them failed.
     SharedFiles(Url, Id, Vec<rusttalk_core::client::SharedFile>),
     /// How far saving a stored file got (0 to 1), by blob ID.
@@ -524,6 +528,8 @@ pub enum Update {
     Synced(Box<Synced>),
     /// Sending this message failed; put it back in the composer.
     Unsent(Url, Draft),
+    /// Slow mode refused a message in this channel: the seconds to wait.
+    SlowMode(Url, Id, u64),
     ForumSent(Url, Id, Id),
     Failed(String),
 }
@@ -2140,6 +2146,11 @@ async fn send(
     leftover: (usize, Vec<rusttalk_core::client::Attachment>),
 ) -> Result<()> {
     let sent = files::post(ctx, url, client, state, target, dm, body, leftover).await;
+    if let Err(error) = &sent
+        && let Some(wait) = error.downcast_ref::<rusttalk_core::client::SlowMode>()
+    {
+        ctx.send(Update::SlowMode(url.clone(), target.0, wait.0));
+    }
     if matches!(sent, Ok(true)) && draft.forum_post {
         ctx.send(Update::ForumSent(url.clone(), target.0, draft.id));
     } else if !matches!(sent, Ok(true)) {
@@ -2224,10 +2235,23 @@ async fn run_command(
 fn report(ctx: &Ctx, error: anyhow::Error) {
     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
     let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    if let Some(wait) = error.downcast_ref::<rusttalk_core::client::SlowMode>() {
+        let text = t!("slow_mode.wait", seconds = wait.0);
+        ctx.send(Update::Failed(text));
+        return;
+    }
+    // Rate limits, and starting too many new DMs in an hour.
+    let limited = error.is::<rusttalk_core::client::RateLimited>()
+        || (error.downcast_ref::<reqwest::Error>())
+            .is_some_and(|error| error.status() == Some(StatusCode::TOO_MANY_REQUESTS));
+    let timed_out = error.is::<rusttalk_core::client::voice::TimedOut>();
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if timed_out => t!("timeout.voice_refused"),
+        _ if limited => t!("net.slow_down"),
+        _ if error.is::<crate::home::new_members::Refused>() => t!("new_members.refused"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));
@@ -2937,9 +2961,11 @@ async fn on_command(
             topic,
             audio_kbps,
             member_limit,
+            slow_mode_secs,
         } => {
             let topic = topic.as_deref();
-            directory::rename_channel(client, &id, &name, topic, audio_kbps, member_limit).await?;
+            let (limit, slow) = (member_limit, slow_mode_secs);
+            directory::rename_channel(client, &id, &name, topic, audio_kbps, limit, slow).await?;
         }
         Command::RenameCategory(id, name) => {
             directory::rename_category(client, &id, &name).await?;
@@ -3050,6 +3076,7 @@ async fn on_command(
             ctx.send(Update::DmReady(url.clone(), channel));
         }
         Command::Invite(uses, seconds) => {
+            new_member_check(state)?;
             let (id, link) = client.invite(uses, seconds).await?;
             ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
@@ -3114,6 +3141,14 @@ async fn on_command(
     Ok(())
 }
 
+/// Starting DMs and making invites wait while the new member rules apply here.
+fn new_member_check(state: &State) -> Result<()> {
+    if (state.last.as_ref()).is_some_and(|dir| crate::home::new_members::until(dir).is_some()) {
+        return Err(crate::home::new_members::Refused.into());
+    }
+    Ok(())
+}
+
 /// This server's DM channel with a person, made when there is none yet.
 async fn dm_channel(
     ctx: &Ctx,
@@ -3128,6 +3163,7 @@ async fn dm_channel(
     if let Some(dm) = existing {
         return Ok(dm.channel);
     }
+    new_member_check(state)?;
     // Pinned there, before any key is wrapped.
     let scope = client.create_dm(&peer).await?;
     directory(ctx, url, client, state).await?;

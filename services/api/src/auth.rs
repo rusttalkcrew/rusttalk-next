@@ -542,6 +542,7 @@ pub async fn authenticate(app: &App, headers: &HeaderMap) -> ApiResult<(WriteTx,
     let actor = actor(&mut tx, &token_hash, ip)
         .await?
         .map_err(|_| ApiError::unauthorized("token_expired"))?;
+    app.limits.request(&actor)?;
     Ok((tx, actor))
 }
 
@@ -557,6 +558,7 @@ pub async fn authenticate_read(
     let actor = actor(&mut tx, &token_hash, ip)
         .await?
         .map_err(|_| ApiError::unauthorized("token_expired"))?;
+    app.limits.request(&actor)?;
     Ok((tx, actor))
 }
 

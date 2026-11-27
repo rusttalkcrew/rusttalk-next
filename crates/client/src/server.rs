@@ -225,11 +225,20 @@ impl Server {
         self.channel(id).is_some_and(|channel| channel.voice)
     }
 
-    /// Whether this person may post in a channel: one of their roles has its Write flag.
+    /// When this person's own timeout here ends, while one runs.
+    pub fn timed_out(&self) -> Option<i64> {
+        (self.member(&self.dir.me)).and_then(|me| me.timeout(crate::notify::unix_now()))
+    }
+
+    /// Whether this person may post in a channel: one of their roles has its Write flag,
+    /// and they aren't in a timeout.
     pub fn can_write(&self, id: &Id) -> bool {
         let Some(channel) = self.channel(id) else {
             return false;
         };
+        if self.timed_out().is_some() {
+            return false;
+        }
         let roles = self
             .member(&self.dir.me)
             .map_or(&[][..], |m| m.roles.as_slice());
@@ -273,6 +282,8 @@ pub struct Directory {
     pub status: Option<Choice>,
     /// Whether this person hides from member lists here while offline.
     pub hide_offline: Option<bool>,
+    /// Why a moderator put this person in a timeout here, if they gave a reason.
+    pub timeout_reason: Option<String>,
     /// The server stores bios (older servers drop them).
     pub bios: bool,
     /// This person has a name here this device can't read yet (no key for its
@@ -294,6 +305,8 @@ pub struct Directory {
     /// Emoji and sticker packs in display order, and how many the server allows.
     pub packs: Vec<EmojiPack>,
     pub packs_max: usize,
+    /// While the new member rules apply to this person: when they end, in unix seconds.
+    pub new_member_until: Option<i64>,
     /// `None` on servers from before events.
     pub calendar: Option<Calendar>,
     /// Lockdown, for people who may change it on servers that have it.
@@ -418,6 +431,10 @@ pub struct Perms {
     pub manage_events: bool,
     /// Put a channel into focus mode for a while.
     pub start_focus: bool,
+    /// Post in a slow mode channel without waiting.
+    pub bypass_slow_mode: bool,
+    /// Stop a lower-ranked member from writing and talking for a while.
+    pub timeout_members: bool,
     /// Turn lockdown on or off and set automatic lockdown.
     pub lock_down: bool,
     /// When banning, also remove what the person posted lately.
@@ -538,6 +555,9 @@ pub struct Channel {
     /// While focus mode is on: when it ends, in unix seconds.
     #[serde(default)]
     pub focus_until: Option<i64>,
+    /// Seconds between one member's messages, 0 when slow mode is off.
+    #[serde(default)]
+    pub slow_mode_secs: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }
@@ -656,9 +676,16 @@ pub struct Member {
     pub bio: Option<String>,
     /// A moderator muted them in every voice channel.
     pub voice_muted: bool,
+    /// While a moderator has them in a timeout: when it ends, in unix seconds.
+    pub timeout_until: Option<i64>,
 }
 
 impl Member {
+    /// When their timeout ends, if one runs at `now` (unix seconds).
+    pub fn timeout(&self, now: i64) -> Option<i64> {
+        self.timeout_until.filter(|until| *until > now)
+    }
+
     /// Whether the member list shows them; hidden people still have names elsewhere.
     pub fn listed(&self) -> bool {
         !(self.hide_offline && self.presence == Presence::Offline)
@@ -996,6 +1023,8 @@ pub struct Chat {
     polls: HashMap<Id, PollEvents>,
     /// Reactions by the first half of their message's ID; they travel as votes.
     reactions: HashMap<[u8; 16], Vec<Reaction>>,
+    /// When slow mode lets this person send here again, in egui time.
+    pub slow_until: Option<f64>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
     /// The channel view has requested its initial history and live updates.
@@ -1018,6 +1047,8 @@ pub struct Chat {
     pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
     pub uploading: Option<(String, f32)>,
+    /// The server asked to slow down and a message here waits to go again.
+    pub slow_down: bool,
     /// The channel's shared files, newest first; `None` until loaded.
     pub shared: Option<Vec<rusttalk_core::client::SharedFile>>,
     /// Whether the shared files were asked for since the files view opened.
@@ -1039,6 +1070,8 @@ pub struct Chat {
     pub flash: Option<(Id, Id, f64)>,
     /// Row heights and the row in view, so only rows near the view are laid out.
     pub rows: crate::home::rows::Rows,
+    /// Blocked people's messages shown anyway, by author and ID.
+    pub revealed: std::collections::HashSet<(Id, Id)>,
     /// Where each ID is in `messages`, for reply quotes; rebuilt after changes.
     by_id: HashMap<Id, Vec<usize>>,
     by_id_len: Option<usize>,
@@ -1471,6 +1504,7 @@ mod tests {
             hide_offline,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         assert!(member(false, Presence::Offline).listed());
         assert!(member(true, Presence::Online).listed());
@@ -1836,6 +1870,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }
     }
 

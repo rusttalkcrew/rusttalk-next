@@ -43,6 +43,7 @@ fn channel(id: Id, name: &str, voice: bool) -> Channel {
         forum: false,
         audio_kbps: 64,
         member_limit: 0,
+        slow_mode_secs: 0,
         focus_until: None,
         flags: Vec::new(),
     }
@@ -100,6 +101,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             },
             Member {
                 person: ANN,
@@ -111,6 +113,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             },
         ]
         .into();

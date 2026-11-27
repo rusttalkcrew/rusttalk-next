@@ -12,8 +12,8 @@ use rusttalk_core::{client::MAX_TEXT_CHARS, messages::PollPart};
 
 use super::{
     Dialog, Embeds, Home, Pick, To, View, add_picture, allow_previews, composer, composer_id,
-    empty, follow_invite, markdown, mentions, message, pane_title, person, picker, poll_draft,
-    polls, preview_status, queue_preview, time, toast_line,
+    empty, follow_invite, markdown, mentions, message, person, picker, poll_draft, polls,
+    preview_status, queue_preview, time, toast_line,
 };
 use crate::{
     files::{self, Ask},
@@ -541,13 +541,14 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     let online = server.status == Status::Online;
     let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);
-    pane_title(
-        ui,
-        "chat-title",
-        &title_text,
-        in_server.then_some(&mut home.layout),
-        Some(channel),
-    );
+    let slow = server.channel(&channel).map_or(0, |c| c.slow_mode_secs);
+    let members = in_server.then_some(&mut home.layout);
+    super::pane_title_with(ui, "chat-title", &title_text, Some(channel), |ui| {
+        if let Some(layout) = members {
+            super::layout::members_button(ui, layout);
+        }
+        super::slow_mode::header_icon(ui, slow);
+    });
     toast_line(ui, &mut home.toast);
     if let Some(out) = (home.sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {
         preview_status(ui, &home.voice, out);

@@ -166,7 +166,9 @@ pub async fn upload(
     let Query(Upload { channel, id }) = args.map_err(|_| ApiError::bad_request("invalid_query"))?;
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    app.limits.upload(&actor)?;
     messages::require_write(&mut tx, &actor, &channel).await?;
+    crate::new_members::check(&mut tx, &actor).await?;
     let files = &app.files;
     let max_file = file_settings::effective(&mut tx, files)
         .await?
@@ -217,6 +219,8 @@ pub async fn upload(
     })
     .await
     .map_err(|_| timeout())??;
+    // Bytes received count even if a quota refuses them below.
+    app.limits.uploaded(&actor, size);
     if size < 16 {
         return Err(ApiError::bad_request("invalid_file_body"));
     }

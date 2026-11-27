@@ -18,9 +18,11 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate, authenticate_read},
-    channels, history, keys, page_files, payload,
+    channels, history, keys, limits, page_files, payload,
     roles::{self, Permission},
-    store::audit,
+    slow_mode,
+    store::{self, audit},
+    timeouts,
 };
 
 /// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys,
@@ -37,6 +39,10 @@ pub struct NewMessage {
     /// A page version's stored files, kept while it is the newest (see `page_files`).
     #[serde(default)]
     keep: Vec<String>,
+    /// An edit, vote, reaction or a post's second part, which slow mode doesn't count.
+    /// Apps send it only in slow mode channels; older ones never do.
+    #[serde(default)]
+    follow_up: bool,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +121,9 @@ pub async fn require_writer(
     person: &[u8],
 ) -> ApiResult<()> {
     let kind = readable_kind(db, channel, person).await?;
+    if kind != "dm" {
+        timeouts::refuse(db, person).await?;
+    }
     if !can_write(db, channel, person, &kind).await? {
         return Err(ApiError::forbidden("channel_write_denied"));
     }
@@ -127,7 +136,16 @@ pub async fn can_write(
     person: &[u8],
     kind: &str,
 ) -> ApiResult<bool> {
-    Ok(kind == "dm" || channels::has_flag(db, channel, person, channels::WRITE).await?)
+    // A timeout leaves DMs open, so a timed-out member can still talk to a moderator.
+    if kind == "dm" {
+        return Ok(true);
+    }
+    Ok(
+        channels::has_flag(db, channel, person, channels::WRITE).await?
+            && timeouts::ends_at(db, person, store::now()?)
+                .await?
+                .is_none(),
+    )
 }
 
 pub async fn create(
@@ -142,11 +160,17 @@ pub async fn create(
         envelope,
         backfill_at,
         keep,
+        follow_up,
     } = payload(body)?;
     decode::<32>(&channel)?;
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let action = match backfill_at {
+        Some(_) => limits::Action::Backfill,
+        None => limits::Action::Post,
+    };
+    app.limits.check(&actor, action)?;
     require_write(&mut tx, &actor, &channel).await?;
     let page = page_files::is_page(&mut tx, &channel).await?;
     let keep = match keep.is_empty() {
@@ -176,6 +200,8 @@ pub async fn create(
     )
     .await?;
     reserve(&mut tx, &id).await?;
+    // Last, so a message refused for another reason doesn't start a wait.
+    slow_mode::check(&mut tx, &actor, &channel, follow_up).await?;
     let size = envelope_bytes.len();
     query(
         "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope, backfilled)
@@ -465,6 +491,7 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    app.limits.check(&actor, limits::Action::Delete)?;
     let kind = chat_kind(&mut tx, &actor, &channel).await?;
     let sender: Vec<u8> =
         query_scalar("SELECT sender_person FROM messages WHERE channel_id = ? AND id = ?")
@@ -594,6 +621,7 @@ mod tests {
                 envelope: encode(&[]),
                 backfill_at,
                 keep,
+                follow_up: false,
             };
             let result = create(
                 State(app.clone()),
@@ -674,6 +702,7 @@ mod tests {
                 envelope: encode(&sealed),
                 backfill_at: Some(1),
                 keep: vec![],
+                follow_up: false,
             };
             create(
                 State(app.clone()),

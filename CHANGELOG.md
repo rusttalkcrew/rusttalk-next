@@ -11,8 +11,16 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Raid tools: lock your server down so nobody new can join, automatically when many people join at once, and remove a banned person's messages from the last hour, day or week.
+- Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.
+- On a computer, opening a channel or DM puts the cursor in the message box so you can type straight away.
 - Settings → Appearance has a Time format choice: Automatic (follows the app language), 12-hour (2:58 PM) or 24-hour (14:58). It applies to every time in the app and follows you to your other devices. Event and focus mode time fields also accept times like 8 PM.
+- Block someone from their profile card, right-click menu or the Friends list: their messages in servers fold into a "Blocked message" line you can open, their voice is muted for you, and their DMs, pokes and friend requests don't reach you. Manage the list in Settings → Privacy; it follows you to your other devices and servers never see it.
+- DMs from people who aren't your friends now wait under Message requests, quietly, until you accept, delete or block them. In Privacy settings you choose who can message you: everyone, server members (as requests) or friends only. Servers limit how many new DMs someone can start per hour.
+- Channel managers can turn on slow mode for a busy channel, from 5 seconds to 6 hours between each member's messages. The message box counts down until you can send again, and moderators can skip the wait.
+- Servers now slow down members who post, react, upload or invite much faster than a person could, and owners pick Relaxed, Standard or Strict in Server settings; a message sent too fast waits a moment and goes out by itself.
+- Server owners can turn on new member rules: for 10 minutes, an hour, a day or a length you choose after joining, members with only the default role can't upload files, start DMs, mention @everyone or roles, or create invites. New members see a note saying when that unlocks.
+- Moderators can time out a member for 60 seconds up to a week, with an optional reason: until it ends they can read but not send messages, react, create invites or join and talk in voice, and they see a banner saying until when. Moderators can end it early.
+- Raid tools: lock your server down so nobody new can join, automatically when many people join at once, and remove a banned person's messages from the last hour, day or week.
 
 ## v0.9.1 - 2026-11-26
 

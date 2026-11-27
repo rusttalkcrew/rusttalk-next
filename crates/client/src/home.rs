@@ -38,7 +38,7 @@ use crate::{
         picker::{self, Picked, Picker, Tab as PickerTab},
     },
     files::{self, Ask, Files},
-    friends::{Act, Friends, Relation},
+    friends::{Act, Friends, Relation, Sort},
     link_cards,
     net::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
@@ -114,10 +114,12 @@ mod gallery;
 pub mod layout;
 mod markdown;
 pub mod mentions;
+pub(crate) mod new_members;
 pub mod person;
 mod pokes;
 pub mod polls;
 pub(crate) mod rows;
+pub(crate) mod slow_mode;
 mod switcher;
 pub(crate) mod user_bar;
 pub(crate) mod view_as;
@@ -178,6 +180,7 @@ pub struct Home {
     pub route_generation: u64,
     pub server_settings: Option<admin::Settings>,
     pub kick: Option<admin::Kick>,
+    pub timeout: Option<admin::timeout::Dialog>,
     /// The crop step for a picked profile picture or server icon.
     pub(crate) crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
@@ -299,6 +302,8 @@ enum Dialog {
         audio: Option<(u32, bool)>,
         /// Voice channels only: the member limit (0 for none), and whether it was changed.
         limit: Option<(u32, bool)>,
+        /// Text and forum channels only: slow mode seconds (0 for off), and whether changed.
+        slow: Option<(u32, bool)>,
         /// Role flags changed on the Permissions tab, sent with Save.
         flags: Vec<(String, u8)>,
     },
@@ -462,6 +467,7 @@ impl Home {
             route_generation: rusttalk_core::route::generation(),
             server_settings: None,
             kick: None,
+            timeout: None,
             crop: None,
             name_draft: None,
             bio_draft: None,
@@ -1030,6 +1036,9 @@ impl Home {
             return;
         }
         let me = *self.identity.certificate.person_id();
+        if let Some(peer) = self.dm_peer(index, &channel) {
+            self.wrote_to(peer, &msg);
+        }
         if msg.person == me
             || msg.edit_of.is_some()
             || matches!(msg.body, Body::Notice { .. } | Body::PollPart(_))
@@ -1045,21 +1054,22 @@ impl Home {
             }
             return;
         }
-        // Friend messages only mean something in a DM.
-        if !dm && matches!(msg.body, Body::Friend(..)) {
+        // Friend messages only mean something in a DM. Blocked people's messages in
+        // shared channels don't mark, mention or notify either.
+        if !dm && (matches!(msg.body, Body::Friend(..)) || self.is_blocked(&msg.person)) {
             return;
         }
         if let Some(peer) = peer {
             self.friend_message(peer, &msg);
-            // Nothing from blocked people; friend answers only change the list. With
-            // "friends only", other people's messages wait quietly under requests.
+            // Nothing from blocked people; friend answers only change the list. Message
+            // requests wait quietly: no sound, no unread marks.
             let relation = self.friends.relation(&peer);
             let quiet = match msg.body {
                 _ if relation == Relation::Blocked => true,
                 Body::Friend(signal, _) => {
                     signal != FriendSignal::Request || relation != Relation::Incoming
                 }
-                _ => self.friends.is_request(&peer, self.friends_only()),
+                _ => self.dm_sort(&peer) != Sort::Shown,
             };
             // A DM arrives once per server holding a copy: count and notify it once, and
             // only for a copy that opened and comes from the other person.
@@ -1145,14 +1155,12 @@ impl Home {
     /// The same for the DMs on every server; blocked people and message requests don't count.
     fn dm_marks(&self) -> (bool, u32) {
         let (prefs, now) = (self.notify.prefs(), notify::unix_now());
-        let friends_only = self.friends_only();
         let dms = (self.servers.iter()).flat_map(|server| {
             (server.dir.dms.iter().map(move |dm| (&server.address, dm))).filter(move |(_, dm)| {
                 !prefs
                     .effective(&server.address, &dm.channel, true, now)
                     .muted
-                    && self.friends.relation(&dm.peer) != Relation::Blocked
-                    && !self.friends.is_request(&dm.peer, friends_only)
+                    && self.dm_sort(&dm.peer) == Sort::Shown
             })
         });
         dms.fold((false, 0), |(unread, mentions), (server, dm)| {
@@ -1179,6 +1187,8 @@ impl Home {
                     topic_changed: false,
                     audio: channel.voice.then_some((channel.audio_kbps, false)),
                     limit: channel.voice.then_some((channel.member_limit, false)),
+                    slow: (!channel.voice && !channel.page)
+                        .then_some((channel.slow_mode_secs, false)),
                     flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
@@ -1589,6 +1599,7 @@ impl Home {
                             self.request_arrived(ctx, (index, channel), peer, msg);
                         }
                         self.friend_message(peer, msg);
+                        self.wrote_to(peer, msg);
                         // The newest page holds pokes sent while this device was away.
                         if !older {
                             self.poke_arrived(ctx, (index, channel), peer, msg, false);
@@ -1729,18 +1740,26 @@ impl Home {
                     invite.link = Some((id, link));
                 }
             }
-            Update::Admin(address, update) => match &mut self.server_settings {
-                Some(settings) if self.servers[settings.server].address == address => {
-                    settings.apply(update);
-                }
-                _ => {
-                    if let AdminUpdate::Failed(text) | AdminUpdate::PartlySaved { text, .. } =
-                        update
-                    {
-                        self.toast = Some((text, now + 6.0));
+            Update::Admin(address, update) => {
+                let mut block = None;
+                match &mut self.server_settings {
+                    Some(settings) if self.servers[settings.server].address == address => {
+                        let done = matches!(update, AdminUpdate::Done(_));
+                        settings.apply(update);
+                        block = done.then(|| settings.banned_to_block()).flatten();
+                    }
+                    _ => {
+                        if let AdminUpdate::Failed(text) | AdminUpdate::PartlySaved { text, .. } =
+                            update
+                        {
+                            self.toast = Some((text, now + 6.0));
+                        }
                     }
                 }
-            },
+                if let Some(person) = block {
+                    self.block(person, now);
+                }
+            }
             Update::Call(address, channel, state) => {
                 let Some(call) = &mut self.voice.call else {
                     return;
@@ -1958,6 +1977,11 @@ impl Home {
                     self.chat(index, channel).uploading = what;
                 }
             }
+            Update::SlowDown(address, channel, waiting) => {
+                if let Some(index) = self.index(&address) {
+                    self.chat(index, channel).slow_down = waiting;
+                }
+            }
             Update::Image(address, blob, fetch, frames) => {
                 self.files.image(ctx, &address, &blob, fetch, frames)
             }
@@ -2028,6 +2052,12 @@ impl Home {
                     if let Some(value) = synced.settings.get(key) {
                         self.synced.insert(key.into(), value.clone());
                     }
+                }
+            }
+            Update::SlowMode(address, channel, secs) => {
+                if let Some(index) = self.index(&address) {
+                    let chat = self.servers[index].chats.entry(channel).or_default();
+                    chat.slow_until = Some(now + secs as f64);
                 }
             }
             Update::ForumSent(address, channel, id) => {
@@ -2490,6 +2520,7 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     admin::kick_dialog(ui.ctx(), home);
+    admin::timeout::dialog(ui.ctx(), home);
     switcher::show(ui.ctx(), home);
     action
 }
@@ -3029,7 +3060,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
     pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
-    let (shown, requests) = home.friends.split(&home.dm_peers(), home.friends_only());
+    let (shown, requests) = home.dm_split();
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for peer in &shown {
@@ -3848,12 +3879,22 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     let field = ui
                         .add(
                             ui::field(name)
+                                .char_limit(crate::profile::NAME_CHARS)
                                 .hint_text(t!("home.name_hint"))
                                 .desired_width(300.0),
                         )
                         .labelled_by(label.id);
                     Some(field)
                 };
+                // An invite pasted here by mistake must not become a name everyone sees.
+                let problem = if member {
+                    None
+                } else if name.trim_start().to_lowercase().starts_with("rusttalk://") {
+                    Some(t!("names.invite_in_name").into())
+                } else {
+                    crate::profile::name_problem(name)
+                };
+                error_text(ui, problem.as_deref());
                 ui.add_space(8.0);
                 if preview.invite.is_none() && !preview.open && !member {
                     ui.label(t!("home.needs_invite"));
@@ -3891,7 +3932,9 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     t!("common.join")
                 };
                 let submit = field.is_some_and(|field| submitted(ui, &field));
-                if ui::primary_large(ui, button).clicked() || submit {
+                let ok = problem.is_none();
+                let clicked = ui.add_enabled_ui(ok, |ui| ui::primary_large(ui, button));
+                if ok && (clicked.inner.clicked() || submit) {
                     let name = name.trim();
                     let admission = match (member, preview.invite) {
                         (true, _) => Admission::Member,
@@ -3990,7 +4033,46 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
+/// Settings → Privacy: everyone this person blocked, each with Unblock.
+fn blocked_people(ui: &mut Ui, home: &mut Home) {
+    ui::page_section(ui, t!("friends.blocked_section"));
+    ui.label(ui::caption(t!("friends.blocked_help")));
+    ui.add_space(ui::SPACE_XS);
+    let blocked: Vec<(Id, String)> = (home.friends.contacts())
+        .filter(|(_, contact)| contact.relation == Relation::Blocked)
+        .map(|(person, contact)| {
+            let name = match home.dm_server(person) {
+                None if !contact.name.is_empty() => contact.name.clone(),
+                _ => home.peer_name(person),
+            };
+            (*person, name)
+        })
+        .collect();
+    if blocked.is_empty() {
+        ui.label(ui::caption(t!("friends.empty_blocked")));
+        return;
+    }
+    let mut unblock = None;
+    for (person, name) in &blocked {
+        ui::trailing_row(
+            ui,
+            |ui| {
+                let button = ui::secondary(ui, t!("friends.unblock")).on_hover_text(name);
+                if button.clicked() {
+                    unblock = Some(*person);
+                }
+            },
+            |ui| ui.add(Label::new(ui::bold(name)).truncate()),
+        );
+    }
+    if let Some(person) = unblock {
+        home.unblock(person, ui.input(|input| input.time));
+    }
+}
+
+/// Who may message this person directly: the top of the Privacy tab.
+fn allow_dms(ui: &mut Ui, home: &mut Home) {
+    use crate::friends::AllowDms;
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     ui::page_section(ui, t!("home.direct_messages"));
@@ -3998,24 +4080,37 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
     ui.add_space(ui::SPACE_XS);
     let changed = ui::segmented(
         ui,
-        &mut settings.friends_only,
+        &mut settings.allow_dms,
         &[
             (
-                false,
+                AllowDms::Everyone,
                 t!("home.allow_dms_everyone"),
                 t!("home.allow_dms_everyone_help"),
             ),
             (
-                true,
+                AllowDms::Requests,
+                t!("home.allow_dms_members"),
+                t!("home.allow_dms_members_help"),
+            ),
+            (
+                AllowDms::Friends,
                 t!("home.allow_dms_friends"),
                 t!("home.allow_dms_friends_help"),
             ),
         ],
     );
     if changed {
-        audio.set_settings(settings.clone());
+        settings.friends_only = settings.allow_dms != AllowDms::Everyone;
+        audio.set_settings(settings);
         home.publish_settings();
     }
+}
+
+pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
+    allow_dms(ui, home);
+    blocked_people(ui, home);
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
     ui::page_section(ui, t!("home.member_lists"));
     let mut hide = settings.hide_offline.on;
     let toggle = ui.add_enabled_ui(!home.servers.is_empty(), |ui| {
@@ -4936,8 +5031,10 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     let thread = home.threads.entry(peer).or_default();
     thread.chat = chat;
     thread.refresh();
-    if let Some(act) = act {
-        home.befriend(peer, act, ui.input(|input| input.time));
+    match act {
+        Some(friends::Card::Friend(act)) => home.befriend(peer, act, ui.input(|input| input.time)),
+        Some(friends::Card::Request(accept)) => home.answer_request(peer, accept),
+        None => {}
     }
 }
 
@@ -4993,7 +5090,7 @@ fn handle_live_file(
 }
 
 /// Shows a chat. In a DM, also returns what the person picked on the friend card.
-fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
+fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<friends::Card> {
     let (title, dm, in_voice, icon) = match at {
         At::Channel(index, channel) => {
             let server = &home.servers[index];
@@ -5033,7 +5130,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let (relation, request) = match at {
         At::Dm(peer) => (
             home.friends.relation(&peer),
-            home.friends.is_request(&peer, home.friends_only()),
+            home.dm_sort(&peer) != Sort::Shown,
         ),
         At::Channel(..) => (Relation::None, false),
     };
@@ -5057,6 +5154,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             })
             .collect(),
         ..Directory::default()
@@ -5092,7 +5190,18 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Channel(_, channel) => Some(channel),
             At::Dm(_) => None,
         };
-        pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
+        let slow = match at {
+            At::Channel(index, channel) => servers[index].channel(&channel),
+            At::Dm(_) => None,
+        }
+        .map_or(0, |channel| channel.slow_mode_secs);
+        let members = in_server.then_some(&mut *layout);
+        pane_title_with(ui, "chat-title", &title, files, |ui| {
+            if let Some(layout) = members {
+                layout::members_button(ui, layout);
+            }
+            slow_mode::header_icon(ui, slow);
+        });
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -5142,6 +5251,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 } else {
                     t!("view_as.read_only")
                 });
+                return None;
+            }
+            // In a timeout: why and until when, in place of the composer.
+            if let At::Channel(index, _) = at
+                && admin::timeout::banner(ui, &servers[index])
+            {
                 return None;
             }
             let hint = if dm {
@@ -5225,6 +5340,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     // whether each starts a group, then their heights as far as known.
     let mut shown: Vec<(usize, bool)> = Vec::new();
     let mut last: Option<&Msg> = None;
+    // A blocked person's message is one line of its own until shown.
+    let hidden = |revealed: &HashSet<(Id, Id)>, msg: &Msg| {
+        msg.person != me
+            && friends.is_blocked(&msg.person)
+            && !matches!(msg.body, Body::Notice { .. })
+            && !revealed.contains(&(msg.person, msg.id))
+    };
     for (at, msg) in chat.messages.iter().enumerate() {
         if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
             || matches!(
@@ -5240,6 +5362,8 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
                 && msg.at - prev.at < 300
                 && msg.reply_to.is_none()
+                && !hidden(&chat.revealed, prev)
+                && !hidden(&chat.revealed, msg)
         });
         shown.push((at, start));
         last = Some(msg);
@@ -5313,6 +5437,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let mut pick = None;
     let mut live = None;
     let mut resend = None;
+    let mut reveal = None;
     let mut tops = Vec::with_capacity(keys.len());
     let (mut changed, mut drawn, mut laid_at, mut end) = (false, 0, 0.0, 0.0);
     let output = area.show_viewport(ui, |ui, viewport| {
@@ -5348,6 +5473,14 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 continue;
             }
             let msg = &chat.messages[row];
+            if hidden(&chat.revealed, msg) {
+                if blocked_line(ui) {
+                    reveal = Some((msg.person, msg.id));
+                }
+                drawn += 1;
+                changed |= rows.measured(keys[i], heights[i], y(ui) - top);
+                continue;
+            }
             // The displayed copy carries this server's emoji and sticker IDs.
             let held_on = holder(msg);
             let (message_dir, message_channel) = match (at, held_on.map(|i| &servers[i])) {
@@ -5432,6 +5565,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         changed,
     });
     chat.rows = rows;
+    if let Some(message) = reveal {
+        chat.revealed.insert(message);
+        ui.ctx().request_repaint();
+    }
     // A row's height changed: lay it out again before showing it, so nothing jumps.
     if changed {
         ui.ctx().request_discard("chat row heights");
@@ -5844,6 +5981,19 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+/// On a computer, a newly opened channel or DM is ready to type in. Phones skip
+/// this: focusing would raise the keyboard over the chat.
+fn focus_on_switch(ui: &Ui, field: &egui::Response) {
+    if ui::TOUCH {
+        return;
+    }
+    let shown = UiId::unique("composer_shown");
+    if ui.data(|d| d.get_temp::<UiId>(shown)) != Some(field.id) {
+        ui.data_mut(|d| d.insert_temp(shown, field.id));
+        field.request_focus();
+    }
+}
+
 /// The unsent notice: the toast whenever no other one shows. Done (`true`) only
 /// once its own text was drawn.
 #[cfg(any(target_os = "android", test))]
@@ -5905,12 +6055,21 @@ fn composer(
     (emoji_picker, scope): (&mut Picker, &picker::Scope),
     (toast, now): (&mut Option<(String, f64)>, f64),
 ) -> (Option<Command>, Option<bool>) {
+    // Slow mode: after a new message here, the next waits (edits and reactions don't).
+    let slow = slow_mode::wait(dir, &channel);
+    let waiting = slow_mode::left(chat, now);
+    if let Some(seconds) = waiting {
+        slow_mode::countdown(ui, seconds);
+    }
     if let Some(editor) = &mut chat.poll_editor {
         match polls::editor(ui, editor, false) {
             Some(polls::Action::Cancel) => chat.poll_editor = None,
-            Some(polls::Action::Post) if online => {
+            Some(polls::Action::Post) if online && waiting.is_none() => {
                 let (question, part) = editor.poll(polls::now());
                 chat.poll_editor = None;
+                if slow > 0 {
+                    chat.slow_until = Some(now + f64::from(slow));
+                }
                 let draft = poll_draft(channel, question, part);
                 return (draft.map(Command::Send), None);
             }
@@ -5942,12 +6101,20 @@ fn composer(
             );
         });
     }
-    let wide = mentions::can_mention_everyone(dir, channel, dir.me);
+    if chat.slow_down {
+        ui.weak(t!("home.slow_down"));
+    }
+    // New members can't mention everyone or roles yet, nor upload files.
+    let new = new_members::until(dir).is_some();
+    new_members::note(ui, dir);
+    let wide = !new && mentions::can_mention_everyone(dir, channel, dir.me);
     let editor = composer_id(channel);
     // From the draft as this frame starts; Enter checks the converted text below.
     let ready = !chat.draft.trim().is_empty()
         || (chat.editing.is_none() && !chat.staged.is_empty())
         || emoji_picker.has_preview();
+    // While slow mode has this person waiting, only an edit can go.
+    let ready = ready && (waiting.is_none() || chat.editing.is_some());
     let mut attach = None;
     let mut send = false;
     let mut tabs = Vec::new();
@@ -5981,13 +6148,13 @@ fn composer(
                 ui::menu_wide(&plus, |m| {
                     let upload = Item::new("📎", t!("home.upload_file"))
                         .hint(t!("home.upload_file_help"))
-                        .enabled(files::PICKER);
+                        .enabled(files::PICKER && !new);
                     if m.add(upload).clicked() {
                         attach = Some(false);
                     }
                     let live = Item::new("📡", t!("home.send_live"))
                         .hint(t!("home.send_live_help"))
-                        .enabled(files::PICKER);
+                        .enabled(files::PICKER && !new);
                     if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
                         attach = Some(true);
                     }
@@ -6004,6 +6171,7 @@ fn composer(
                         composer_field(ui, chat, dir, online, channel, hint, wide, emoji_picker)
                     })
                     .inner;
+                focus_on_switch(ui, &field);
                 ui.add_enabled_ui(online, |ui| {
                     for (glyph, tip, tab) in [
                         ("☺", t!("home.emoji_picker"), PickerTab::Emoji),
@@ -6160,7 +6328,7 @@ fn composer(
         }
     }
     // A sticker goes out on its own, leaving the draft as it is.
-    if let Some((id, name, inline)) = sticker {
+    if let Some((id, name, inline)) = sticker.filter(|_| waiting.is_none()) {
         let Ok(message) = rusttalk_core::keys::random_key() else {
             tracing::warn!("no randomness for a message ID");
             return (None, attach);
@@ -6188,6 +6356,9 @@ fn composer(
         // Docked, the panel stays up for the next one, without the keyboard.
         if !picker::docked(ui.ctx()) {
             field.request_focus();
+        }
+        if slow > 0 {
+            chat.slow_until = Some(now + f64::from(slow));
         }
         return (Some(command), attach);
     }
@@ -6220,6 +6391,9 @@ fn composer(
     let editing = chat.editing.is_some();
     let nothing = text.is_empty() && (editing || chat.staged.is_empty());
     if !((focused && enter) || send) || nothing || count > MAX_TEXT_CHARS {
+        return (None, attach);
+    }
+    if waiting.is_some() && !editing {
         return (None, attach);
     }
     if !allowed {
@@ -6276,6 +6450,9 @@ fn composer(
     });
     chat.clear_draft();
     field.request_focus();
+    if slow > 0 && !editing {
+        chat.slow_until = Some(now + f64::from(slow));
+    }
     (Some(command), attach)
 }
 
@@ -6436,6 +6613,18 @@ fn quiet(text: RichText) -> Label {
         .selectable(false)
         .truncate()
         .show_tooltip_when_elided(false)
+}
+
+/// The line in place of a blocked person's message; true when "Show" is clicked.
+fn blocked_line(ui: &mut Ui) -> bool {
+    ui.add_space(ui::SPACE_XS);
+    let shown = ui.horizontal(|ui| {
+        ui.weak("🚫");
+        ui.label(RichText::new(t!("home.blocked_message")).weak().italics());
+        ui.link(t!("home.show_blocked_message")).clicked()
+    });
+    ui.add_space(ui::SPACE_XS);
+    shown.inner
 }
 
 fn message_time(ui: &mut Ui, msg: &Msg) {
@@ -7185,6 +7374,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
             let (_, submitted) = name_field(ui, name);
+            let problem = crate::profile::name_problem(name);
+            error_text(ui, problem.as_deref());
             if !default_name.is_empty() {
                 ui.add_space(ui::SPACE_S);
                 let label = t!("home.use_default_name", name = default_name);
@@ -7192,7 +7383,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     name_choice = Some((*index, None));
                 }
             }
-            if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
+            if text_footer(ui, t!("common.save"), submitted, &mut close)
+                && !name.trim().is_empty()
+                && problem.is_none()
             {
                 name_choice = Some((*index, Some(name.trim().to_owned())));
             }
@@ -7297,6 +7490,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             topic_changed,
             audio,
             limit,
+            slow,
             flags,
         } => {
             let data = &home.servers[*server];
@@ -7365,6 +7559,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= spin.changed();
                     }
+                    if let Some((secs, changed)) = slow {
+                        *changed |= slow_mode::picker(ui, secs);
+                    }
                     entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => {
@@ -7389,8 +7586,10 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 // Only what changed, so saving permissions doesn't log a rename too.
                 let audio_kbps = audio.and_then(|(kbps, changed)| changed.then_some(kbps));
                 let member_limit = limit.and_then(|(most, changed)| changed.then_some(most));
+                let slow_mode_secs = slow.and_then(|(secs, changed)| changed.then_some(secs));
                 let voice_changed = audio_kbps.is_some() || member_limit.is_some();
-                if name.trim() != channel.name || *topic_changed || voice_changed {
+                let settings_changed = voice_changed || slow_mode_secs.is_some();
+                if name.trim() != channel.name || *topic_changed || settings_changed {
                     command = Some((
                         *server,
                         Command::RenameChannel {
@@ -7399,6 +7598,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             topic: topic_changed.then(|| topic.trim().to_owned()),
                             audio_kbps,
                             member_limit,
+                            slow_mode_secs,
                         },
                     ));
                 }
@@ -7737,6 +7937,7 @@ mod tests {
                         hide_offline: false,
                         bio: None,
                         voice_muted: false,
+                        timeout_until: None,
                     }]
                     .into(),
                     ..Default::default()
@@ -7821,6 +8022,7 @@ mod tests {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             }]
             .into(),
             ..Default::default()
@@ -7934,9 +8136,11 @@ mod tests {
     mod album;
     mod audit_log;
     mod avatars;
+    mod blocking;
     mod call_controls;
     mod camera_pip;
     mod clock_format;
+    mod composer_focus;
     mod diagram;
     mod dialogs;
     mod emoji;
@@ -7946,22 +8150,28 @@ mod tests {
     mod gallery;
     mod image_reload;
     mod joining;
+    mod link_names;
     mod lockdown;
     mod long_chat;
     mod member_list;
     mod menus;
     mod message_history;
+    mod message_requests;
     mod message_spacing;
+    mod new_members;
     mod outbox;
     mod presence;
     mod rail;
+    mod rate_limits;
     mod reactions;
     mod reply_jump;
     mod server_emoji;
     mod settings_close;
+    mod slow_mode;
     mod sticker_picker;
     mod streams;
     mod switcher;
+    mod timeouts;
     mod touch;
     mod uploads;
     mod voice_limit;
@@ -8012,6 +8222,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")].into();
         server.dir.categories = vec![crate::server::Category {
@@ -8026,6 +8237,7 @@ mod tests {
                 forum: false,
                 audio_kbps: 0,
                 member_limit: 0,
+                slow_mode_secs: 0,
                 focus_until: None,
                 flags: vec![("member".into(), 3)],
             }],
@@ -8312,6 +8524,7 @@ mod tests {
             forum: false,
             audio_kbps: 64,
             member_limit: 0,
+            slow_mode_secs: 0,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 15)).collect(),
         };
@@ -8780,6 +8993,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }]
         .into();
         home.servers.push(server);

@@ -34,6 +34,7 @@ use crate::{
     auth::authenticate_read,
     channels, messages, payload,
     roles::{self, Permission},
+    store, timeouts,
 };
 
 mod enforcer;
@@ -347,9 +348,9 @@ pub async fn token(
 ) -> ApiResult<Json<Token>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
+    timeouts::refuse(&mut tx, &actor.person).await?;
     let sources = publish_sources(&mut tx, &channel, &actor.person).await?;
-    let can_publish_data =
-        channels::has_flag(&mut tx, &channel, &actor.person, channels::WRITE).await?;
+    let can_publish_data = messages::can_write(&mut tx, &channel, &actor.person, "voice").await?;
     let (audio_kbps, member_limit): (i64, i64) =
         query_as("SELECT audio_kbps, member_limit FROM channels WHERE id = ?")
             .bind(&channel)
@@ -451,12 +452,19 @@ async fn require_chat_read(
     messages::can_write(db, channel, person, &kind).await
 }
 
-async fn publish_sources(
+pub(crate) async fn publish_sources(
     db: &mut SqliteConnection,
     channel: &str,
     person: &[u8],
 ) -> ApiResult<Vec<TrackSource>> {
     let mut sources = Vec::new();
+    // A timed-out member may stay to listen, but shares nothing.
+    if timeouts::ends_at(db, person, store::now()?)
+        .await?
+        .is_some()
+    {
+        return Ok(sources);
+    }
     if channels::has_flag(db, channel, person, channels::SPEAK).await? {
         // A moderator's mute silences them fully: app audio could carry the microphone too.
         if !moderation::muted(db, person).await? {
@@ -663,8 +671,7 @@ async fn decide(
     }
     // Grants follow the current flags both ways, so lifting a mute gives the microphone back.
     let mut permission = participant.permission.clone();
-    permission.can_publish_data =
-        channels::has_flag(&mut db, channel, person, channels::WRITE).await?;
+    permission.can_publish_data = messages::can_write(&mut db, channel, person, "voice").await?;
     let mut allowed: Vec<i32> = (publish_sources(&mut db, channel, person).await?.into_iter())
         .map(|source| source as i32)
         .collect();
@@ -834,6 +841,7 @@ mod tests {
             key: Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: Some(Arc::new(LiveKit {
                 api_key: api_key.into(),
                 api_secret: Zeroizing::new(api_secret.into()),
@@ -844,6 +852,7 @@ mod tests {
                 queue: Default::default(),
             })),
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };

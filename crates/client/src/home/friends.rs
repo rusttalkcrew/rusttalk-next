@@ -8,7 +8,7 @@ use super::{
     person::{self, Person},
 };
 use crate::{
-    friends::{Act, Relation, now_ms},
+    friends::{Act, Relation, Sort, now_ms},
     net::{Command, Draft},
     server::{Body, Directory, Id, Msg},
     ui::{self, Look},
@@ -43,10 +43,38 @@ impl Home {
             return;
         }
         let name = self.peer_name(&person);
+        let was_blocked = self.friends.is_blocked(&person);
         if let Some(signal) = self.friends.act(person, act, &name, now_ms()) {
             self.signal(person, signal, &targets);
         }
+        if self.friends.is_blocked(&person) != was_blocked {
+            self.mute_voice(person, !was_blocked);
+        }
         self.publish_friends();
+    }
+
+    /// Block someone: they look unfriended, and their DMs, pokes, friend requests and
+    /// voice requests are dropped on this person's devices. Synced, never sent to a server.
+    pub fn block(&mut self, person: Id, now: f64) {
+        self.befriend(person, Act::Block, now);
+    }
+
+    pub fn unblock(&mut self, person: Id, now: f64) {
+        self.befriend(person, Act::Unblock, now);
+    }
+
+    pub fn is_blocked(&self, person: &Id) -> bool {
+        self.friends.is_blocked(person)
+    }
+
+    /// Their voice in calls, on this device only, as the call mixer sets it.
+    fn mute_voice(&self, person: Id, muted: bool) {
+        let audio = &self.voice.audio;
+        let mut all = audio.mix();
+        let mut mix = all.person(&person);
+        mix.voice.muted = muted;
+        all.set_person(&person, mix);
+        audio.set_mix(all);
     }
 
     /// Send a friend message in the DM on each server, with one ID so the copies merge.
@@ -139,9 +167,68 @@ impl Home {
         }
     }
 
-    /// Whether the person allows DMs from friends only.
-    pub(super) fn friends_only(&self) -> bool {
-        self.voice.audio.snapshot().friends_only
+    /// Where the DM with them goes, by who this person allows to message them.
+    pub(super) fn dm_sort(&self, peer: &Id) -> Sort {
+        let allow = self.voice.audio.snapshot().allow_dms;
+        self.friends.sort(peer, allow, self.newest_from(peer))
+    }
+
+    /// Everyone with a DM, split into the normal list and message requests.
+    pub(super) fn dm_split(&self) -> (Vec<Id>, Vec<Id>) {
+        let sorted = self
+            .dm_peers()
+            .into_iter()
+            .map(|peer| (peer, self.dm_sort(&peer)));
+        let (mut shown, mut requests) = (Vec::new(), Vec::new());
+        for (peer, sort) in sorted {
+            match sort {
+                Sort::Shown => shown.push(peer),
+                Sort::Request => requests.push(peer),
+                Sort::Hidden => {}
+            }
+        }
+        (shown, requests)
+    }
+
+    /// The server time of their newest message loaded in the DM.
+    fn newest_from(&self, peer: &Id) -> Option<i64> {
+        let thread = self.threads.get(peer)?;
+        (thread.chat.messages.iter())
+            .filter(|msg| msg.person == *peer && msg.body != Body::Unreadable)
+            .map(|msg| msg.at)
+            .max()
+    }
+
+    /// Accept or delete their message request, here and on the other devices.
+    pub(super) fn answer_request(&mut self, peer: Id, accept: bool) {
+        let name = self.peer_name(&peer);
+        if accept {
+            self.friends.accept(peer, &name, now_ms());
+        } else {
+            let newest = self.newest_from(&peer);
+            self.friends.dismiss(peer, newest, &name, now_ms());
+            self.view = View::Direct(None);
+        }
+        self.publish_friends();
+    }
+
+    /// Writing to someone lets their DMs in, like accepting their request; also for
+    /// conversations from before message requests existed.
+    pub(super) fn wrote_to(&mut self, peer: Id, msg: &Msg) {
+        let me = *self.identity.certificate.person_id();
+        if msg.person != me
+            || !matches!(msg.body, Body::Text(_) | Body::Poll(..))
+            || !matches!(
+                self.friends.relation(&peer),
+                Relation::None | Relation::Incoming
+            )
+        {
+            return;
+        }
+        let name = self.peer_name(&peer);
+        if self.friends.accept(peer, &name, now_ms()) {
+            self.publish_friends();
+        }
     }
 }
 
@@ -185,7 +272,11 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
         .map(|(person, contact)| {
             let name = match home.dm_server(person) {
                 Some(_) => home.peer_name(person),
-                None if !contact.name.is_empty() => contact.name.clone(),
+                None if !contact.name.is_empty()
+                    && !rusttalk_core::names::contains_link(&contact.name) =>
+                {
+                    contact.name.clone()
+                }
                 None => home.peer_name(person),
             };
             (*person, contact.relation, name)
@@ -295,19 +386,33 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-/// The card above a DM with someone who isn't a friend yet, or who asked to be one.
+/// What the card on top of a DM asks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Card {
+    Friend(Act),
+    /// Accept or delete a message request.
+    Request(bool),
+}
+
+/// The card above a DM with someone who asked to be friends, or a message request.
 /// Returns what the person picked.
-pub fn dm_card(ui: &mut Ui, relation: Relation, request: bool, name: &str) -> Option<Act> {
-    let (text, yes, no) = match relation {
+pub fn dm_card(ui: &mut Ui, relation: Relation, request: bool, name: &str) -> Option<Card> {
+    let (text, buttons) = match relation {
         Relation::Incoming => (
             t!("friends.card_request", name = name),
-            (t!("friends.accept"), Act::Accept),
-            (t!("friends.decline"), Act::Decline),
+            vec![
+                (t!("friends.accept"), Card::Friend(Act::Accept)),
+                (t!("friends.decline"), Card::Friend(Act::Decline)),
+            ],
         ),
         _ if request => (
             t!("friends.card_stranger", name = name),
-            (t!("friends.add"), Act::Add),
-            (t!("friends.block"), Act::Block),
+            vec![
+                (t!("friends.accept"), Card::Request(true)),
+                (t!("friends.delete_request"), Card::Request(false)),
+                // Blocking as #667 grows it; `Act::Block` is the one place it starts.
+                (t!("friends.block"), Card::Friend(Act::Block)),
+            ],
         ),
         _ => return None,
     };
@@ -316,12 +421,16 @@ pub fn dm_card(ui: &mut Ui, relation: Relation, request: bool, name: &str) -> Op
     ui::card(ui, |ui| {
         ui.add(Label::new(text).wrap());
         ui.add_space(ui::SPACE_S);
-        ui.horizontal(|ui| {
-            if ui::primary(ui, yes.0).clicked() {
-                picked = Some(yes.1);
-            }
-            if ui::secondary(ui, no.0).clicked() {
-                picked = Some(no.1);
+        ui.horizontal_wrapped(|ui| {
+            for (index, (label, card)) in buttons.into_iter().enumerate() {
+                let button = match card {
+                    _ if index == 0 => ui::primary(ui, label),
+                    Card::Friend(Act::Block) => ui::danger(ui, label),
+                    _ => ui::secondary(ui, label),
+                };
+                if button.clicked() {
+                    picked = Some(card);
+                }
             }
         });
     });

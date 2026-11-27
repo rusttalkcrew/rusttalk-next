@@ -9,17 +9,21 @@ mod files;
 mod history;
 mod index;
 mod keys;
+mod limits;
 mod lockdown;
 mod members;
 mod messages;
 mod metadata;
+mod new_members;
 mod page_files;
 mod presence;
 mod roles;
+mod slow_mode;
 mod store;
 mod sync;
 #[cfg(test)]
 mod testing;
+mod timeouts;
 mod updates;
 mod voice;
 
@@ -39,7 +43,7 @@ use axum::{
     extract::{MatchedPath, Request, rejection::JsonRejection},
     http::{
         HeaderMap, Method, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_LENGTH},
+        header::{CACHE_CONTROL, CONTENT_LENGTH, RETRY_AFTER},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -78,7 +82,9 @@ struct App {
     joins: Arc<lockdown::Joins>,
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
+    limits: Arc<limits::Limits>,
     session_ttl: i64,
+    dm_starts: Arc<dms::Starts>,
 }
 
 /// Events a socket may fall behind before it must resync. A slot frees once every socket has
@@ -122,6 +128,9 @@ struct ApiError {
     code: &'static str,
     /// The underlying error for the server log only, such as SQLite's message.
     detail: Option<String>,
+    /// For 429s: the seconds until the request may succeed, sent as `Retry-After` and
+    /// `retry_after`.
+    retry_after: Option<i64>,
     /// Text for the person refused, sent as `message`: only a lockdown's notice.
     message: Option<String>,
 }
@@ -132,6 +141,7 @@ impl ApiError {
             status,
             code,
             detail: None,
+            retry_after: None,
             message: None,
         }
     }
@@ -149,6 +159,12 @@ impl ApiError {
     }
     fn internal(code: &'static str) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, code)
+    }
+    fn too_many(code: &'static str, retry_after: i64) -> Self {
+        Self {
+            retry_after: Some(retry_after),
+            ..Self::new(StatusCode::TOO_MANY_REQUESTS, code)
+        }
     }
 }
 
@@ -187,16 +203,22 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
             tracing::error!(reason = self.code, error = self.detail, "request failed");
-        } else {
+        } else if self.retry_after.is_none() {
+            // Rate limits log once a minute per person themselves, not every refusal.
             tracing::warn!(reason = self.code, "request rejected");
         }
-        match self.message {
-            Some(message) => (
-                self.status,
-                Json(json!({ "error": self.code, "message": message })),
-            )
-                .into_response(),
-            None => (self.status, Json(json!({ "error": self.code }))).into_response(),
+        let mut body = json!({ "error": self.code });
+        if let Some(secs) = self.retry_after {
+            body["retry_after"] = secs.into();
+        }
+        if let Some(message) = self.message {
+            body["message"] = message.into();
+        }
+        match self.retry_after {
+            Some(secs) => {
+                (self.status, [(RETRY_AFTER, secs.to_string())], Json(body)).into_response()
+            }
+            None => (self.status, Json(body)).into_response(),
         }
     }
 }
@@ -257,9 +279,11 @@ async fn run() -> Result<()> {
             history::init()?;
             let files = Arc::new(files::Files::open(&dir, &db).await?);
             let emoji = Arc::new(emoji::Emoji::open(&dir, &db).await?);
+            let limits = Arc::new(limits::Limits::open(&mut *db.acquire().await?).await?);
             serve(App {
                 files,
                 emoji,
+                limits,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(CHANGE_BACKLOG).0,
@@ -268,6 +292,7 @@ async fn run() -> Result<()> {
                 joins: Default::default(),
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
                 session_ttl: auth::session_ttl()?,
+                dm_starts: Arc::new(dms::Starts::from_env()?),
             })
             .await?;
         }
@@ -295,6 +320,10 @@ async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.clone()));
     // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
     voice::start_enforcer(&app);
+    // Give voice back when the timeouts running now end.
+    if let Err(error) = timeouts::resume(&app).await {
+        tracing::error!(reason = error.code, "scheduling timeout ends failed");
+    }
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     // A host that lowered RUSTTALK_MESSAGE_RETAIN gets its channels trimmed now.
@@ -333,8 +362,16 @@ fn routes(app: App) -> Router {
             get(file_settings::get).put(file_settings::set),
         )
         .route(
+            "/v1/settings/rate-limits",
+            get(limits::get).put(limits::set),
+        )
+        .route(
             "/v1/settings/message-history",
             get(history::get).put(history::set),
+        )
+        .route(
+            "/v1/settings/new-member-rules",
+            get(new_members::get).put(new_members::set),
         )
         .route(
             "/v1/settings/open-joining",
@@ -423,6 +460,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/members/{person}/voice-mute",
             put(voice::moderation::mute).delete(voice::moderation::unmute),
+        )
+        .route(
+            "/v1/members/{person}/timeout",
+            put(timeouts::set).delete(timeouts::end),
         )
         .route(
             "/v1/bans/{person}",

@@ -816,6 +816,7 @@ fn unsaved_profile(home: &Home) -> bool {
 fn name_row(ui: &mut Ui, home: &mut Home) {
     let saved = home.voice.audio.settings().display_name;
     let mut save = None;
+    let problem = (home.name_draft.as_deref()).and_then(crate::profile::name_problem);
     ui::setting_row(
         ui,
         t!("settings.name"),
@@ -836,7 +837,9 @@ fn name_row(ui: &mut Ui, home: &mut Home) {
                         .desired_width(180.0),
                 );
                 let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if ui::primary(ui, t!("common.save")).clicked() || entered {
+                let ok = problem.is_none();
+                let clicked = ui.add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")));
+                if ok && (clicked.inner.clicked() || entered) {
                     save = Some(draft.trim().to_owned());
                 }
                 if ui::secondary(ui, t!("common.cancel")).clicked() {
@@ -845,6 +848,7 @@ fn name_row(ui: &mut Ui, home: &mut Home) {
             }
         },
     );
+    error_text(ui, problem.as_deref());
     if let Some(name) = save.filter(|name| !name.is_empty()) {
         home.name_draft = None;
         home.change_profile(|settings, servers| {

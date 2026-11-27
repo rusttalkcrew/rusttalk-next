@@ -83,6 +83,7 @@ pub(super) async fn rename_channel(
     topic: Option<&str>,
     audio_kbps: Option<u32>,
     member_limit: Option<u32>,
+    slow_mode_secs: Option<u32>,
 ) -> Result<()> {
     // The update also replaces category and position. Read them just before saving.
     let catalog = client.catalog().await?;
@@ -110,6 +111,9 @@ pub(super) async fn rename_channel(
     }
     if let Some(limit) = member_limit {
         body["member_limit"] = limit.into();
+    }
+    if let Some(secs) = slow_mode_secs {
+        body["slow_mode_secs"] = secs.into();
     }
     client
         .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
@@ -287,9 +291,14 @@ pub(super) async fn profile(
     let Some(mut sources) = state.raw.take() else {
         return directory(ctx, url, client, state).await;
     };
+    // A timeout put on or ended: `/v1/me` has its reason for the banner.
+    let timeout_changed = own && sources.me["timeout_until"].as_i64() != profile.timeout_until;
     if !patch_profile(&mut sources, person, profile, own) {
         // Not listed yet: a member this directory doesn't know, so load it all.
         return directory(ctx, url, client, state).await;
+    }
+    if timeout_changed {
+        sources.me = get(client, "/v1/me").await?;
     }
     let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
     let lockdown = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
@@ -308,6 +317,10 @@ fn patch_profile(sources: &mut Sources, person: &str, profile: &MemberProfile, o
     row["hide_offline"] = json!(profile.hide_offline);
     row["avatar_initialized"] = json!(profile.avatar_initialized);
     row["voice_muted"] = json!(profile.voice_muted);
+    match profile.timeout_until {
+        Some(until) => row["timeout_until"] = json!(until),
+        None => _ = row.as_object_mut().map(|row| row.remove("timeout_until")),
+    }
     if own {
         sources.me["hide_offline"] = json!(profile.hide_offline);
     }
@@ -391,6 +404,10 @@ async fn rebuild(
         space,
         emoji,
     } = &sources;
+    client.slow_mode = (catalog.channels.iter())
+        .filter(|channel| channel.slow_mode_secs.is_some_and(|secs| secs > 0))
+        .map(|channel| channel.id)
+        .collect();
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
@@ -574,10 +591,12 @@ fn build(
                     "manage_emoji" => perms.manage_emoji = true,
                     "mute_members" => perms.mute_members = true,
                     "move_members" => perms.move_members = true,
+                    "timeout_members" => perms.timeout_members = true,
                     "suggest_events" => perms.suggest_events = true,
                     "create_events" => perms.create_events = true,
                     "manage_events" => perms.manage_events = true,
                     "start_focus" => perms.start_focus = true,
+                    "bypass_slow_mode" => perms.bypass_slow_mode = true,
                     "lock_down" => perms.lock_down = true,
                     "remove_recent_messages" => perms.remove_recent_messages = true,
                     _ => {}
@@ -660,6 +679,7 @@ fn build(
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             member_limit: channel.member_limit.unwrap_or(0),
             focus_until: channel.focus_until,
+            slow_mode_secs: channel.slow_mode_secs.unwrap_or(0),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -708,6 +728,12 @@ fn build(
         if person == my_id && name.is_none() && row["display_name_ct"].is_string() {
             my_name_hidden = true;
         }
+        // My own name stays as typed, so I can see it and fix it in settings.
+        let name = if person == my_id {
+            name
+        } else {
+            crate::profile::received_name(name)
+        };
         let devices = client
             .devices()
             .filter(|device| device.person_id() == &person)
@@ -727,6 +753,7 @@ fn build(
             hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
             bio: received_bio(text(Metadata::Bio, &person, row["bio_ct"].as_str())),
             voice_muted: row["voice_muted"].as_bool().unwrap_or_default(),
+            timeout_until: row["timeout_until"].as_i64(),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -796,6 +823,12 @@ fn build(
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         hide_offline: me["hide_offline"].as_bool(),
+        new_member_until: me["new_member_until"].as_i64(),
+        timeout_reason: text(
+            Metadata::TimeoutReason,
+            &my_id,
+            me["timeout_reason_ct"].as_str(),
+        ),
         my_name_hidden,
         bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
         me: *client.identity.certificate.person_id(),
@@ -1125,6 +1158,7 @@ mod tests {
             hide_offline: true,
             avatar_initialized: true,
             voice_muted: true,
+            timeout_until: None,
         };
         assert!(patch_profile(&mut sources, "a", &profile, true));
         let mut expected = row("a", "new");
@@ -1174,6 +1208,7 @@ mod tests {
             audio_kbps: None,
             member_limit: None,
             focus_until: None,
+            slow_mode_secs: None,
             flags: Vec::new(),
         };
         let encrypt =
@@ -1237,6 +1272,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }
     }
 

@@ -46,7 +46,13 @@ pub struct ChannelFields {
     /// Voice channels only: the most people in the call, 0 for none. Kept when missing.
     #[serde(default)]
     member_limit: Option<i64>,
+    /// Text channels only: seconds between one member's messages, 0 for off. Kept when missing.
+    #[serde(default)]
+    slow_mode_secs: Option<i64>,
 }
+
+/// The slow mode choices apps offer, in seconds; 0 is off.
+pub const SLOW_MODE_SECS: [i64; 9] = [0, 5, 10, 30, 60, 300, 900, 3600, 21600];
 
 /// Voice bitrate limits in kbps, enforced here and again by the table.
 const AUDIO_KBPS: std::ops::RangeInclusive<i64> = 8..=320;
@@ -77,6 +83,7 @@ struct ChannelRow {
     audio_kbps: i64,
     member_limit: i64,
     focus_until: Option<i64>,
+    slow_mode_secs: i64,
 }
 
 #[derive(Serialize)]
@@ -96,6 +103,9 @@ pub struct Channel {
     /// While focus mode is on: when it ends, in unix seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_until: Option<i64>,
+    /// While slow mode is on: the seconds between one member's messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slow_mode_secs: Option<i64>,
     flags: Vec<RoleFlags>,
 }
 
@@ -200,7 +210,8 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
     let rows: Vec<ChannelRow> = query_as(
         "SELECT id, CASE WHEN page THEN 'page' WHEN forum THEN 'forum' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
-                audio_kbps, member_limit, CASE WHEN focus_until > ? THEN focus_until END AS focus_until
+                audio_kbps, member_limit, CASE WHEN focus_until > ? THEN focus_until END AS focus_until,
+                slow_mode_secs
          FROM channels c
          WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
@@ -242,6 +253,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             audio_kbps,
             member_limit,
             focus_until: row.focus_until,
+            slow_mode_secs: (row.slow_mode_secs > 0).then_some(row.slow_mode_secs),
             flags,
         });
     }
@@ -453,6 +465,9 @@ pub async fn update_channel(
             return Err(ApiError::bad_request("not_a_voice_channel"));
         }
     }
+    if let Some(secs) = fields.slow_mode_secs {
+        set_slow_mode(&mut tx, &actor, &id, secs).await?;
+    }
     category_exists(&mut tx, &fields.category_id).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let changed = query(
@@ -491,6 +506,44 @@ pub async fn update_channel(
         part: Some(Part::Channels),
     });
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Set a text channel's slow mode, and audit it when it changed.
+async fn set_slow_mode(
+    db: &mut SqliteConnection,
+    actor: &Actor,
+    id: &str,
+    secs: i64,
+) -> ApiResult<()> {
+    if !SLOW_MODE_SECS.contains(&secs) {
+        return Err(ApiError::bad_request("invalid_slow_mode"));
+    }
+    let before: i64 = query_scalar(
+        "SELECT slow_mode_secs FROM channels WHERE id = ? AND kind = 'text' AND NOT page",
+    )
+    .bind(id)
+    .fetch_optional(&mut *db)
+    .await?
+    .ok_or(ApiError::bad_request("not_a_text_channel"))?;
+    if before == secs {
+        return Ok(());
+    }
+    query("UPDATE channels SET slow_mode_secs = ? WHERE id = ?")
+        .bind(secs)
+        .bind(id)
+        .execute(&mut *db)
+        .await?;
+    audit_details(
+        db,
+        &actor.person,
+        "slow_mode_changed",
+        None,
+        Some(id),
+        Some(serde_json::json!({ "before": before, "after": secs })),
+        actor.at,
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn permissions(
@@ -916,8 +969,10 @@ mod tests {
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };
@@ -1085,8 +1140,10 @@ mod tests {
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };
@@ -1136,6 +1193,7 @@ mod tests {
                 audio_kbps: value,
                 audio_kbps_max: None,
                 member_limit: None,
+                slow_mode_secs: None,
             }))
         };
         let stored = || async {
@@ -1208,8 +1266,10 @@ mod tests {
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };
@@ -1395,8 +1455,10 @@ mod tests {
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
+            limits: crate::limits::Limits::for_tests(None, true).into(),
             voice: None,
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };
@@ -1521,6 +1583,7 @@ mod tests {
                     audio_kbps: None,
                     audio_kbps_max: None,
                     member_limit: None,
+                    slow_mode_secs: None,
                 })),
             )
         };
@@ -1546,6 +1609,75 @@ mod tests {
         assert_eq!(delete(2, 20).await?, StatusCode::NO_CONTENT);
         assert_eq!(delete(1, 21).await?, StatusCode::NO_CONTENT);
         assert_eq!(listed(1).await, [id(22)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_mode_is_a_managers_text_channel_setting_and_audited() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = crate::testing::app(dir.path(), 2).await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        for (channel, kind, page) in [
+            (20_u8, "text", false),
+            (21, "voice", false),
+            (22, "text", true),
+        ] {
+            query("INSERT INTO channels (id, kind, page, category_id, position, name_ct) VALUES (?, ?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(page).bind(id(10)).execute(&app.db).await?;
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'owner', 15), (?, 'member', 15)")
+                .bind(id(channel)).bind(id(channel)).execute(&app.db).await?;
+        }
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'member')")
+            .bind(crate::testing::person(2))
+            .execute(&app.db)
+            .await?;
+        let update = |who: u8, channel: u8, secs: i64| {
+            update_channel(
+                State(app.clone()),
+                crate::testing::as_person(who),
+                Path(id(channel)),
+                Ok(Json(ChannelFields {
+                    category_id: id(10),
+                    position: 0,
+                    name_ct: String::new(),
+                    topic_ct: None,
+                    audio_kbps: None,
+                    audio_kbps_max: None,
+                    member_limit: None,
+                    slow_mode_secs: Some(secs),
+                })),
+            )
+        };
+        let code = |result: ApiResult<StatusCode>| result.unwrap_err().code;
+        assert_eq!(code(update(2, 20, 30).await), "permission_denied");
+        assert_eq!(code(update(1, 20, 7).await), "invalid_slow_mode");
+        assert_eq!(code(update(1, 21, 30).await), "not_a_text_channel");
+        assert_eq!(code(update(1, 22, 30).await), "not_a_text_channel");
+
+        // Saved and audited with what changed; saving the same value again logs nothing.
+        let mut tx = app.db.begin().await?;
+        let owner = crate::auth::Actor {
+            person: [1; 32],
+            device: vec![1],
+            ip: "192.0.2.1".into(),
+            at: 50,
+            session_id: vec![1],
+            expires_at: i64::MAX,
+        };
+        set_slow_mode(&mut tx, &owner, &id(20), 300).await?;
+        set_slow_mode(&mut tx, &owner, &id(20), 300).await?;
+        let listed = channels(&mut tx, Some(crate::testing::person(1).as_slice())).await?;
+        let shown: Vec<_> = listed.iter().map(|c| c.slow_mode_secs).collect();
+        assert_eq!(shown, [Some(300), None, None]);
+        let audited: Vec<(String, String, String)> =
+            query_as("SELECT action, target_id, details FROM audit_log")
+                .fetch_all(&mut *tx)
+                .await?;
+        let details = serde_json::json!({ "before": 0, "after": 300 }).to_string();
+        assert_eq!(audited, [("slow_mode_changed".into(), id(20), details)]);
         Ok(())
     }
 }

@@ -11,10 +11,10 @@ ALTER TABLE server_settings ADD COLUMN auto_lockdown_joins INTEGER NOT NULL DEFA
 ALTER TABLE server_settings ADD COLUMN auto_lockdown_secs INTEGER NOT NULL DEFAULT 120
     CHECK (auto_lockdown_secs > 0);
 
--- `lock_down` (131072) for the built-in staff roles and custom roles that may ban.
-UPDATE roles SET permissions = permissions | 131072
+-- `lock_down` (524288) for the built-in staff roles and custom roles that may ban.
+UPDATE roles SET permissions = permissions | 524288
 WHERE id IN ('owner', 'admin', 'moderator') OR (kind = 'custom' AND (permissions & 4) <> 0);
--- `remove_recent_messages` (262144) for the built-in staff roles and custom roles that may
+-- `remove_recent_messages` (1048576) for the built-in staff roles and custom roles that may
 -- both ban and delete messages.
-UPDATE roles SET permissions = permissions | 262144
+UPDATE roles SET permissions = permissions | 1048576
 WHERE id IN ('owner', 'admin', 'moderator') OR (kind = 'custom' AND (permissions & 36) = 36);

@@ -117,7 +117,7 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
-| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline}`; `status` is the caller’s own presence choice |
+| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline, new_member_until?}`; `status` is the caller’s own presence choice; `new_member_until` (Unix seconds) is present while the new member rules apply to the caller |
 | PUT `/v1/me/hide-offline` | `{hide_offline}` | Any member. 204. Stores whether member lists leave the caller out while their visible presence is `offline`, and sends `member_changed` |
 | PUT `/v1/me/status` | `{status, picked?}`, `status` one of `online`, `away`, `dnd`, `invisible` | Any member. 204. With `picked: true` (apps that report idle separately), stored as the member's choice for all their devices and sent to their own sockets as `presence_changed` with `chosen`. Without `picked` (older apps, which also send `away` by themselves after a while without input): `away` marks the calling device idle and is not stored; `online` and `invisible` are stored, and `online` also ends the device's idle; while the stored choice is `dnd`, their `online` only ends the device's idle |
 | PUT `/v1/me/idle` | `{idle}`, a boolean | Any member. 204. Whether the calling device has had no input for a while. Kept in memory only, never stored; dropped once the device has been disconnected for the reconnect grace. Older servers answer 404 |
@@ -129,6 +129,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
 | DELETE `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, lifts the mute |
+| PUT `/v1/members/{person}/timeout` | `{seconds, reason_ct?}` | `timeout_members` and a strictly higher rank, as for a kick. 204. `seconds` is one of 60, 300, 600, 3600, 86400 or 604800 (otherwise `400 invalid_timeout`); a new timeout replaces a running one. `reason_ct` is optional space-key metadata (`TimeoutReason`, the member's person ID as metadata ID). Until it ends the member gets `403 timed_out` when posting a message (also reactions, edits, forum posts, files and live files) in any non-DM channel, creating an invite or asking for a voice token, and LiveKit lets them publish nothing in rooms they are already in. DMs stay open. Stored with its end, so restarts and leaving don't end it. Sends `member_changed` with the profile's `timeout_until`; `GET /v1/members` lists it too, and `GET /v1/me` adds `timeout_until` and `timeout_reason_ct` for the member only. Audited as `member_timed_out` with `{seconds, ends_at}`. The end itself sends nothing; clients compare it with their clock |
+| DELETE `/v1/members/{person}/timeout` | Empty | `timeout_members` and a strictly higher rank. 204, ends a running timeout early (`404 timeout_not_found` without one). Audited as `member_timeout_ended` |
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip, can_lift}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?, remove_secs?}`, default false and none | `ban`. 204. `remove_secs` (3600, 86400 or 604800, otherwise `400 invalid_remove_window`) also needs `remove_recent_messages`: the server deletes the person's messages sent in that many seconds before the ban from every non-DM channel, by sender and time without reading them, and expires the files they uploaded then (except files the newest version of a page keeps), which cleanup unlinks right away. Audited as `recent_messages_removed` with `{secs, messages, files}`. Readers get a `message_deleted` per message, or one `resync` when more than 200 went |
 | DELETE `/v1/bans/{person}` | Empty | `ban` and may lift it (see below). 204 |
@@ -148,6 +150,10 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
 | GET `/v1/settings/message-history` | Empty | Any member. 200, `{keep, ceiling?}` |
 | PUT `/v1/settings/message-history` | `{keep}` | `manage_server`. 200, the saved `{keep, ceiling?}` |
+| GET `/v1/settings/rate-limits` | Empty | Any member. 200, `{preset, ceiling?}` |
+| PUT `/v1/settings/rate-limits` | `{preset}` | `manage_server`. 200, the saved `{preset, ceiling?}` |
+| GET `/v1/settings/new-member-rules` | Empty | Any member. 200, `{secs}` |
+| PUT `/v1/settings/new-member-rules` | `{secs}` | `manage_server`. 200, the saved `{secs}`. A change is audited as `new_member_rules_changed` with `{before, after}` and sends `channel_changed` |
 | GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before` |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
@@ -169,17 +175,42 @@ lowers a saved `keep` (including `0`) to it. A lower `keep` deletes older
 messages in every channel before PUT returns, one channel per transaction,
 with a `message_deleted` event per message. Older servers answer 404.
 
+Each member's requests are rate limited with token buckets kept in memory (reset
+on restart). `preset` is `strict`, `standard` (the default) or `relaxed`;
+relaxed allows four times the standard rates, strict half. Standard allows, per
+person: message posts (messages, edits, reactions, votes and friend messages
+alike, since the server cannot tell them apart) a burst of 20, then 1 a second;
+DM history backfill posts 30, then 2 a second; message deletes 10, then 1 a
+second; file uploads 60, then 2 a second, and 512 MiB, then 2 MiB a
+second (counted after each upload); new DMs 10, then 10 an hour; invites 20,
+then 20 an hour; status and idle changes 5, then 1 a second. Every
+authenticated request counts toward 300, then 30 a second, per session, and
+four times that per address (an IPv6 /64). Over a limit the server answers
+`429 rate_limited` with `Retry-After`. `ceiling` is present only when the host
+set `RUSTTALK_RATE_LIMITS`; that preset is then also the default, and the
+server keeps a looser saved preset at it. Older servers answer 404.
+
+New member rules: for `secs` (0 = off, the default; at most 2,592,000, 30 days,
+otherwise `400 invalid_new_member_rules`) after `joined_at`, a member whose only
+role is the default one, who is not the Owner and lacks `skip_new_member_rules`,
+gets `403 new_member_rules` from `POST /v1/files`, `POST /v1/invites` and
+`POST /v1/dms` (opening an existing DM still works). Mentions of everyone and roles
+are inside encrypted messages, so apps hold those back themselves: the sender’s app
+doesn’t send them while `new_member_until` is set. Older servers answer 404.
+
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all eighteen flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all twenty-one flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
-`create_events`, `manage_events`, `start_focus`, `lock_down` and `remove_recent_messages`.
-Upgrading also gives `lock_down` to custom roles with `ban`, and `remove_recent_messages`
-to custom roles with `ban` and `delete_messages`. Member (0) has `suggest_events`
+`create_events`, `manage_events`, `start_focus`, `bypass_slow_mode`, `timeout_members`,
+`lock_down` and `remove_recent_messages`. Upgrading also gives `bypass_slow_mode` to
+custom roles that have `delete_messages`, `timeout_members` to custom roles that have
+`kick`, `lock_down` to custom roles with `ban`, and `remove_recent_messages` to custom
+roles with `ban` and `delete_messages`. Member (0) has `suggest_events`
 and `start_focus` and starts as the default. Every new role gets `start_focus`
 when its creator has it. The other flags are `invite`, `manage_roles`,
-`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
-`manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
+`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`,
+`manage_emoji` and `skip_new_member_rules`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
 after decoding. Supply a client-generated 16-byte ID when setting an
@@ -276,15 +307,15 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint`, `invalid_remove_window`, `invalid_lockdown_message`, `invalid_auto_lockdown` |
+| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_timeout`, `invalid_member_limit`, `invalid_slow_mode`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `not_a_text_channel`, `invalid_message`, `invalid_keep`, `invalid_new_member_rules`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint`, `invalid_remove_window`, `invalid_lockdown_message`, `invalid_auto_lockdown` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `server_locked`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `server_locked`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full`, `timed_out`, `new_member_rules` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `timeout_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout`, `body_timeout` (a change body must arrive within 30 s; file uploads have their own limits) |
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
-| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
+| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit`, `new_dm_limit`, `slow_mode`, `rate_limited` (all with a `Retry-After` header and `retry_after`, both in seconds) |
 | 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_event`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
 | 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
 | 503 | `file_upload_busy`, `voice_unavailable` |
@@ -509,7 +540,7 @@ any category; the body may be up to 64 KiB. A repeated ID returns
 | GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
 | GET `/v1/channels` | Empty | `manage_channels`. 200, the channels the caller can read (the Owner reads all) |
 | POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
-| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, audio_kbps_max?, member_limit?}` | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204. `audio_kbps` (voice channels only, 8 to 320, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. Audio is sent in mono, which Opus caps at about 256 kbps, so higher values sound the same; above 128 clients also turn off discontinuous transmission (DTX) so quiet music isn't cut. `audio_kbps_max` is the highest bitrate the sending app offers (320 now; absent means 128, as in apps up to v0.6.0, whose slider stops there). When `audio_kbps` equals that maximum and the stored bitrate is higher, the stored bitrate stays: such an app clamped it and resends the clamped value when its manager saves another field. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one |
+| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, audio_kbps_max?, member_limit?, slow_mode_secs?}` | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204. `audio_kbps` (voice channels only, 8 to 320, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. Audio is sent in mono, which Opus caps at about 256 kbps, so higher values sound the same; above 128 clients also turn off discontinuous transmission (DTX) so quiet music isn't cut. `audio_kbps_max` is the highest bitrate the sending app offers (320 now; absent means 128, as in apps up to v0.6.0, whose slider stops there). When `audio_kbps` equals that maximum and the stored bitrate is higher, the stored bitrate stays: such an app clamped it and resends the clamped value when its manager saves another field. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one. `slow_mode_secs` (text and forum channels only, one of 0, 5, 10, 30, 60, 300, 900, 3600 or 21600, 0 = off, default 0; otherwise `400 invalid_slow_mode`, or `400 not_a_text_channel` for voice channels and pages) is how long each member waits between messages there; when absent it stays as it was. A change is audited as `slow_mode_changed` with `{before, after}`. The catalog and channel list return it as `slow_mode_secs` while it is on |
 | DELETE `/v1/channels/{id}` | Empty | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204 |
 | PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels`, read access to the channel (otherwise `404 channel_not_found`) and a lower-ranked target role. The Owner can also change the Owner role. 204 |
 | PUT `/v1/channels/{id}/focus` | `{seconds}` | `start_focus` and read access to a voice channel (other channels it can read: `400 not_a_voice_channel`). 204. Turns focus mode on until `seconds` (1 to 86,400) from now, or off with 0; anything else is `400 invalid_focus_time`. The catalog and channel list return the end as `focus_until` (Unix seconds) while it is in the future. A change sends `channel_changed`; the end itself sends nothing, clients compare it with their clock |
@@ -565,6 +596,10 @@ expiry are audited.
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
 | POST `/v1/dms` | `{id, peer, commitment, envelope}` | Any member. 201, `{id}`. Returns 200 with the existing ID if the pair already has a DM |
+
+A person can start at most 20 new DMs per hour on a server; more get
+`429 new_dm_limit`. Asking for a pair's existing DM doesn't count. The server
+keeps these times in memory only and forgets them on restart.
 
 `peer` is a different current person. Either person can create the DM, using a
 random ID and an epoch 1 envelope addressed to their device. The normal channel
@@ -702,8 +737,17 @@ action twice changes nothing either. The app reads each DM's newest page when
 it connects, so requests sent while it was away show up; one older than that
 page shows when the chat is scrolled back.
 
+Message requests are sorted by the app too. "Allow DMs from" (`allow_dms`)
+is `everyone`, `requests` (the default: people who aren't friends land under
+Message requests, with no sound or unread marks) or `friends` (their DMs stay
+hidden; friend requests still arrive). Friends and people this person asked
+are always shown, blocked people never. Accepting a request, or writing in
+the DM, sets `accepted` on the contact. Deleting one sets `dismissed` to the
+server time of their newest message, and the request stays away until a newer
+one arrives. Nothing is sent to the other person or the server.
+
 The list itself is in the person's sync blob under `contacts`: per hex person
-ID, `{relation, name, changed, since, seen}`. `relation` is `none`,
+ID, `{relation, name, changed, since, seen, accepted?, dismissed?}`. `relation` is `none`,
 `outgoing`, `incoming`, `friend` or `blocked`; `name` is the last name seen;
 `changed` is when the relation last changed, in Unix milliseconds. When two
 devices changed the same person, the later `changed` wins, whichever blob is
@@ -715,6 +759,18 @@ person) go under "Message requests", without notifications or unread marks.
 Blocked people's DMs are hidden and never notify. The servers still deliver
 these messages; refusing them there would mean telling the server who is a
 friend.
+
+Blocking is enforced only by the blocker's apps. Their DMs, pokes, friend and
+voice requests are dropped; in shared channels their messages fold into a
+"Blocked message" line that the person can open, and never mark, mention or
+notify; in calls their voice is muted on the device that blocked (the local
+mixer, not synced). The server is never told. A server-side list would let it
+refuse DMs and pokes before storing them, but the server already knows the
+sender and the receiver of every DM, so any refusal rule it evaluates reveals
+who blocks whom to the operator; a keyed hash doesn't help, since person IDs
+are public. The cost is that a blocked person can still use the blocker's
+servers' storage and bandwidth for DMs nobody reads; server rate limits and
+moderation (kick, ban) cover abuse of that.
 
 ### Pokes
 
@@ -831,7 +887,7 @@ and the client can restart from the newest page.
 | Method and path | Body or query | Permission and success |
 | --- | --- | --- |
 | GET `/v1/channels/{channel}/messages?before={id}&limit={n}` | Optional cursor and limit, 1–100, default 50 | `read`. 200, array of message records |
-| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}`, and a page version's optional `keep` (file IDs) | `write`. 201, the stored message record |
+| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}`, a page version's optional `keep` (file IDs), and an optional `follow_up` | `write`. 201, the stored message record. In a slow mode channel a member without `bypass_slow_mode` waits `slow_mode_secs` after each message (the server keeps the time in memory); one sent sooner is `429 slow_mode`. Apps send `follow_up: true` there, and only there, for an edit, vote, reaction, poll end or a post's text after its poll, which don't count. Older apps never send it, so each of their records counts |
 | GET `/v1/channels/{channel}/messages/{id}` | Empty | `read`. 200, one message record |
 | DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author, or in a non-DM channel a reader with `delete_messages`. 204, else `403 permission_denied` |
 | GET `/v1/channels/{channel}/message-devices/{device}/{person}` | Empty | `read`. 200, the public device certificate as a base64url JSON string, when the device authored a retained message here |

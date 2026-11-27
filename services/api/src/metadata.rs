@@ -305,15 +305,34 @@ pub(crate) async fn profile(
     db: &mut SqliteConnection,
     person: &[u8],
 ) -> ApiResult<Option<MemberProfile>> {
-    let row: Option<(Ciphertext, Option<String>, Ciphertext, bool, bool, bool)> = query_as(
-        "SELECT display_name_ct, avatar_hash, bio_ct, hide_offline, avatar_initialized, voice_muted
-         FROM members WHERE person_id = ?",
+    type ProfileRow = (
+        Ciphertext,
+        Option<String>,
+        Ciphertext,
+        bool,
+        bool,
+        bool,
+        Option<i64>,
+    );
+    let row: Option<ProfileRow> = query_as(
+        "SELECT display_name_ct, avatar_hash, bio_ct, hide_offline, avatar_initialized, voice_muted,
+                (SELECT ends_at FROM timeouts t WHERE t.person_id = m.person_id AND ends_at > ?)
+         FROM members m WHERE person_id = ?",
     )
+    .bind(crate::store::now()?)
     .bind(person)
     .fetch_optional(db)
     .await?;
     Ok(row.map(
-        |(display_name, avatar_hash, bio, hide_offline, avatar_initialized, voice_muted)| {
+        |(
+            display_name,
+            avatar_hash,
+            bio,
+            hide_offline,
+            avatar_initialized,
+            voice_muted,
+            timeout,
+        )| {
             MemberProfile {
                 display_name_ct: encoded(display_name),
                 avatar_hash,
@@ -321,6 +340,7 @@ pub(crate) async fn profile(
                 hide_offline,
                 avatar_initialized,
                 voice_muted,
+                timeout_until: timeout,
             }
         },
     ))
@@ -341,9 +361,13 @@ pub struct Member {
     /// A moderator muted them in every voice channel.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     voice_muted: bool,
+    /// A moderator put them in a timeout that ends then, in unix seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_until: Option<i64>,
 }
 
-/// Person, display name, avatar hash, bio, `hide_offline`, `voice_muted`, and `avatar_initialized`.
+/// Person, display name, avatar hash, bio, `hide_offline`, `voice_muted`, `avatar_initialized`
+/// and a running timeout's end.
 type MemberRow = (
     Vec<u8>,
     Ciphertext,
@@ -352,15 +376,18 @@ type MemberRow = (
     bool,
     bool,
     bool,
+    Option<i64>,
 );
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let rows: Vec<MemberRow> = query_as(
-        "SELECT person_id, display_name_ct, avatar_hash, bio_ct, hide_offline, voice_muted, avatar_initialized
-         FROM members
+        "SELECT person_id, display_name_ct, avatar_hash, bio_ct, hide_offline, voice_muted, avatar_initialized,
+                (SELECT ends_at FROM timeouts t WHERE t.person_id = m.person_id AND ends_at > ?)
+         FROM members m
          ORDER BY person_id",
     )
+    .bind(crate::store::now()?)
     .fetch_all(&mut *tx)
     .await?;
     let assignments: Vec<(Vec<u8>, String)> = query_as(
@@ -388,6 +415,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
                     hide_offline,
                     voice_muted,
                     avatar_initialized,
+                    timeout_until,
                 )| {
                     let person_id = encode(&person);
                     Member {
@@ -403,6 +431,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
                         role_ids: roles.remove(&person).unwrap_or_default(),
                         hide_offline,
                         voice_muted,
+                        timeout_until,
                     }
                 },
             )

@@ -227,7 +227,13 @@ fn member_rank(dir: &Directory, member: &Member) -> i64 {
 type Permission = (&'static str, &'static str, &'static str, bool);
 
 /// The permissions in groups, with the group titles.
-fn groups(events: bool, focus: bool, raid: bool) -> Vec<(&'static str, Vec<Permission>)> {
+fn groups(
+    events: bool,
+    focus: bool,
+    slow: bool,
+    new_members: bool,
+    raid: bool,
+) -> Vec<(&'static str, Vec<Permission>)> {
     let mut groups = vec![
         (
             t!("admin.group_general"),
@@ -313,6 +319,22 @@ fn groups(events: bool, focus: bool, raid: bool) -> Vec<(&'static str, Vec<Permi
             "start_focus",
             t!("perm.start_focus"),
             t!("perm.start_focus_help"),
+            false,
+        ));
+    }
+    if slow {
+        groups[2].1.push((
+            "bypass_slow_mode",
+            t!("perm.bypass_slow_mode"),
+            t!("perm.bypass_slow_mode_help"),
+            false,
+        ));
+    }
+    if new_members {
+        groups[2].1.push((
+            "skip_new_member_rules",
+            t!("perm.skip_new_member_rules"),
+            t!("perm.skip_new_member_rules_help"),
             false,
         ));
     }
@@ -817,11 +839,26 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
     let chosen = page
         .permissions
         .get_or_insert_with(|| role.permissions.clone());
-    // Servers that know focus mode gave it to the owner role, which keeps every permission.
-    let focus = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "start_focus"));
-    // Servers with raid tools gave them to the owner role too.
-    let raid = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "lock_down"));
-    let groups = groups(dir.calendar.is_some(), focus, raid);
+    // Servers that know focus mode, slow mode, new member rules or raid tools gave them to
+    // the owner role, which keeps every permission.
+    let knows =
+        |name: &str| (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == name));
+    let mut groups = groups(
+        dir.calendar.is_some(),
+        knows("start_focus"),
+        knows("bypass_slow_mode"),
+        knows("skip_new_member_rules"),
+        knows("lock_down"),
+    );
+    // Likewise for timeouts, which older servers refuse.
+    if knows("timeout_members") {
+        groups[2].1.push((
+            "timeout_members",
+            t!("perm.timeout_members"),
+            t!("perm.timeout_members_help"),
+            false,
+        ));
+    }
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);
@@ -1161,6 +1198,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         let (ann, bob) = ([1; 32], [2; 32]);
         let dir = Directory {

@@ -43,13 +43,19 @@ pub enum Permission {
     ManageEvents = 16384,
     /// Put a channel into focus mode for a while.
     StartFocus = 32768,
+    /// Post in a slow mode channel without waiting.
+    BypassSlowMode = 65536,
+    /// Skip the new member rules (see `new_members`).
+    SkipNewMemberRules = 131072,
+    /// Stop a lower-ranked member from writing and talking for a while.
+    TimeoutMembers = 262144,
     /// Turn lockdown on or off and set automatic lockdown: nobody new joins while it's on.
-    LockDown = 131072,
+    LockDown = 524288,
     /// When banning someone, also remove what they posted in the last hour, day or week.
-    RemoveRecentMessages = 262144,
+    RemoveRecentMessages = 1048576,
 }
 
-const PERMISSIONS: [Permission; 18] = [
+const PERMISSIONS: [Permission; 21] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -66,6 +72,9 @@ const PERMISSIONS: [Permission; 18] = [
     Permission::CreateEvents,
     Permission::ManageEvents,
     Permission::StartFocus,
+    Permission::BypassSlowMode,
+    Permission::SkipNewMemberRules,
+    Permission::TimeoutMembers,
     Permission::LockDown,
     Permission::RemoveRecentMessages,
 ];

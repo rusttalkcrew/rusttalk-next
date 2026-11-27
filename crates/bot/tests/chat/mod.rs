@@ -3,8 +3,8 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{Event, KeyClient, MessageBody, MessageError},
-    keys::{self, KeyState, Scope},
+    client::{Event, KeyClient, MessageBody, MessageError, SlowMode, UploadRejected},
+    keys::{self, KeyState, Metadata, Scope},
     messages::{
         Ballot, MessageContext, Poll, PollPart, Reaction, ReactionEmoji, reaction_vote, tally,
         tally_reactions,
@@ -31,7 +31,9 @@ const REACTED: &str = "#511 Peridot Message With Reactions";
 const PAGE: &str = "#210 Malachite Page by a moderator";
 const POST: &str = "# #211 Topaz Forum Post\nby a member";
 const REPLY: &str = "#211 Beryl Forum Reply";
-pub(super) const TEXTS: [&str; 17] = [
+const SLOW_FIRST: &str = "#660 Jasper First Slow Message";
+const SLOW_EDIT: &str = "#660 Agate Edited Slow Message";
+pub(super) const TEXTS: [&str; 19] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -49,6 +51,8 @@ pub(super) const TEXTS: [&str; 17] = [
     PAGE,
     POST,
     REPLY,
+    SLOW_FIRST,
+    SLOW_EDIT,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -422,7 +426,259 @@ pub(super) async fn scenario(
     reactions(a, b, c, text).await?;
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
+    slow_mode(a, b, c, text).await?;
+    new_member_rules(a, b, c, text).await?;
+    timeouts(a, b, c, text, &category).await?;
     Ok((dm, b_message))
+}
+
+/// #664: only a server manager turns on new member rules, which is audited. C, who just
+/// joined with only the default role, then may not upload files or start a DM; B, a
+/// moderator, may. Turned off, C uploads again.
+async fn new_member_rules(
+    a: &KeyClient<'_>,
+    b: &KeyClient<'_>,
+    c: &KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    const PATH: &str = "/v1/settings/new-member-rules";
+    let set = |client: &KeyClient<'_>, secs: i64| {
+        (client.request(Method::PUT, PATH))
+            .json(&json!({ "secs": secs }))
+            .send()
+    };
+    rejected(
+        set(b, 3600).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    set(a, 3600).await?.error_for_status()?;
+    ensure!(
+        me(c).await?["new_member_until"].is_i64(),
+        "C is not a new member"
+    );
+    ensure!(
+        me(b).await?.get("new_member_until").is_none(),
+        "B is a new member"
+    );
+
+    async fn upload(client: &KeyClient<'_>, channel: &[u8; 32]) -> Result<()> {
+        (client.upload_file(
+            channel,
+            "664.bin",
+            "application/octet-stream",
+            &[6; 64],
+            None,
+        ))
+        .await
+        .map(drop)
+    }
+    let refused = upload(c, &text.id)
+        .await
+        .err()
+        .context("a new member uploaded a file")?;
+    let code = refused
+        .downcast_ref::<UploadRejected>()
+        .map(|r| r.code.as_str());
+    assert_eq!(code, Some("new_member_rules"));
+    upload(b, &text.id).await?;
+    let dm = c
+        .request(Method::POST, "/v1/dms")
+        .json(&json!({
+            "id": encode(&keys::random_key()?[..]),
+            "peer": encode(a.identity.certificate.person_id()),
+            "commitment": encode(&[0; 32]),
+            "envelope": "",
+        }))
+        .send()
+        .await?;
+    rejected(dm, StatusCode::FORBIDDEN, "new_member_rules").await?;
+
+    let audit: Vec<Value> = (a.request(Method::GET, "/v1/audit").send().await?)
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit
+            .iter()
+            .any(|row| row["action"] == "new_member_rules_changed"
+                && row["details"]["after"] == 3600),
+        "missing new member rules audit"
+    );
+    set(a, 0).await?.error_for_status()?;
+    upload(c, &text.id).await?;
+    println!(
+        "#664 verified new member rules: managed, audited, enforced for new default members only"
+    );
+    Ok(())
+}
+
+async fn me(client: &KeyClient<'_>) -> Result<Value> {
+    Ok((client.request(Method::GET, "/v1/me").send().await?)
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+/// #663: moderator B times out member C, who may only read: no message, reaction or voice
+/// join. C's app hears at once; A ends it early; both are audited.
+async fn timeouts(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+    category: &[u8; 32],
+) -> Result<()> {
+    let b_person = *b.identity.certificate.person_id();
+    let c_person = encode(c.identity.certificate.person_id());
+    let path = format!("/v1/members/{c_person}/timeout");
+    let reason = c.encrypt_metadata(
+        keys::Metadata::TimeoutReason,
+        c.identity.certificate.person_id(),
+        b"#663 Obsidian reason",
+    )?;
+    rejected(
+        c.request(
+            Method::PUT,
+            &format!("/v1/members/{}/timeout", encode(&b_person)),
+        )
+        .json(&json!({ "seconds": 60 }))
+        .send()
+        .await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    rejected(
+        b.request(Method::PUT, &path)
+            .json(&json!({ "seconds": 61 }))
+            .send()
+            .await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_timeout",
+    )
+    .await?;
+    b.request(Method::PUT, &path)
+        .json(&json!({ "seconds": 600, "reason_ct": reason }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // C's own app learns it from the live event, then reads the reason from /v1/me.
+    let until = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(Event::MemberChanged {
+                person,
+                profile: Some(profile),
+                ..
+            }) = c.next_event().await?
+                && person == c_person
+                && let Some(until) = profile.timeout_until
+            {
+                return Ok::<_, anyhow::Error>(until);
+            }
+        }
+    })
+    .await
+    .context("C's app heard nothing of the timeout")??;
+    let me: Value = c
+        .request(Method::GET, "/v1/me")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(me["timeout_until"], until);
+    let shown = c.decrypt_metadata(
+        keys::Metadata::TimeoutReason,
+        c.identity.certificate.person_id(),
+        me["timeout_reason_ct"].as_str().context("reason missing")?,
+    )?;
+    assert_eq!(shown, b"#663 Obsidian reason");
+
+    let refused = |result: Result<_>| {
+        result
+            .err()
+            .and_then(|error| error.downcast::<reqwest::Error>().ok())
+            .and_then(|error| error.status())
+    };
+    let posted = a.send_message(&text.id, &body(TEXT_A)).await?;
+    let reaction = MessageBody {
+        poll: Some(reaction_vote(
+            &posted.id,
+            &ReactionEmoji::Unicode("👍".into()).key(),
+            1,
+            true,
+        )),
+        ..Default::default()
+    };
+    for message in [body(TEXT_B), reaction] {
+        let result = c.send_message(&text.id, &message).await.map(|_| ());
+        assert_eq!(refused(result), Some(StatusCode::FORBIDDEN));
+    }
+    // C may see a lounge, so only the timeout refuses the join.
+    let voice = a
+        .create_channel(category, "voice", b"#663 Lounge", b"")
+        .await?;
+    let lounge = |flags: u8| {
+        a.request(
+            Method::PUT,
+            &format!("/v1/channels/{}/permissions/member", encode(&voice.id)),
+        )
+        .json(&json!({ "flags": flags }))
+        .send()
+    };
+    lounge(1).await?.error_for_status()?;
+    rejected(
+        c.request(
+            Method::POST,
+            &format!("/v1/voice/{}/token", encode(&voice.id)),
+        )
+        .send()
+        .await?,
+        StatusCode::FORBIDDEN,
+        "timed_out",
+    )
+    .await?;
+    // Later steps expect C to hold no other channel keys.
+    a.request(
+        Method::DELETE,
+        &format!("/v1/channels/{}", encode(&voice.id)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+
+    a.request(Method::DELETE, &path)
+        .send()
+        .await?
+        .error_for_status()?;
+    rejected(
+        a.request(Method::DELETE, &path).send().await?,
+        StatusCode::NOT_FOUND,
+        "timeout_not_found",
+    )
+    .await?;
+    c.send_message(&text.id, &body(TEXT_B)).await?;
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for action in ["member_timed_out", "member_timeout_ended"] {
+        ensure!(
+            audit
+                .iter()
+                .any(|row| row["action"] == action && row["target_person_id"] == c_person),
+            "missing {action} audit"
+        );
+    }
+    println!(
+        "#663 verified timeouts: ranked, live, enforced on messages, reactions and voice, ended early, audited"
+    );
+    Ok(())
 }
 
 /// A posts a poll, B and C vote (B changes their mind), and A counts the votes it reads.
@@ -546,6 +802,98 @@ async fn reactions(
     expected.sort();
     ensure!(result == expected, "unexpected reactions {result:?}");
     println!("#511 verified encrypted reactions: two people, one taken back");
+    Ok(())
+}
+
+/// #660: only a channel manager turns on slow mode, which is audited. Then C, a member,
+/// waits between messages (but not for an edit), while B, a moderator, doesn't.
+async fn slow_mode(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    let catalog = a.catalog().await?;
+    let channel = (catalog.channels.iter())
+        .find(|channel| channel.id == text.id)
+        .context("text channel missing")?;
+    let name = a.decrypt_metadata(
+        Metadata::ChannelName,
+        &text.id,
+        channel
+            .name_ct
+            .as_deref()
+            .context("channel without a name")?,
+    )?;
+    let update = json!({
+        "category_id": channel.category_id,
+        "position": channel.position,
+        "name_ct": a.encrypt_metadata(Metadata::ChannelName, &text.id, &name)?,
+    });
+    let set = |client: &KeyClient<'_>, secs: u32| {
+        let mut update = update.clone();
+        update["slow_mode_secs"] = secs.into();
+        client
+            .request(Method::PUT, &format!("/v1/channels/{}", encode(&text.id)))
+            .json(&update)
+            .send()
+    };
+    rejected(
+        set(b, 60).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    rejected(
+        set(a, 7).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_slow_mode",
+    )
+    .await?;
+    set(a, 60).await?.error_for_status()?;
+    let listed = a
+        .catalog()
+        .await?
+        .channels
+        .into_iter()
+        .find(|c| c.id == text.id);
+    assert_eq!(listed.and_then(|c| c.slow_mode_secs), Some(60));
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit.iter().any(|row| row["action"] == "slow_mode_changed"
+            && row["target_id"] == encode(&text.id)
+            && row["details"]["after"] == 60),
+        "missing slow mode audit"
+    );
+
+    // The app marks follow-ups such as edits in a slow mode channel.
+    c.slow_mode.insert(text.id);
+    let first = c.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    let refused = c.send_message(&text.id, &body(SLOW_FIRST)).await;
+    let wait = refused
+        .err()
+        .and_then(|error| error.downcast::<SlowMode>().ok())
+        .context("a second message went through slow mode")?;
+    ensure!((1..=60).contains(&wait.0), "unexpected wait {}", wait.0);
+    let mut edit = body(SLOW_EDIT);
+    edit.edit_of = Some(first.id);
+    c.send_message(&text.id, &edit).await?;
+    // A moderator bypasses it.
+    for _ in 0..2 {
+        b.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    }
+    set(a, 0).await?.error_for_status()?;
+    c.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    c.slow_mode.clear();
+    println!(
+        "#660 verified slow mode: managed, audited, enforced per member, bypassed by moderators"
+    );
     Ok(())
 }
 

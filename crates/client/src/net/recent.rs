@@ -382,7 +382,8 @@ impl Listing {
                 .into_iter()
                 .map(|(person, name, hide_offline)| Member {
                     person,
-                    name,
+                    // Saved by an app from before names with links were hidden.
+                    name: crate::profile::received_name(name),
                     hide_offline,
                     avatar: by_owner.remove(&person),
                     presence: Presence::Offline,
@@ -390,6 +391,7 @@ impl Listing {
                     roles: vec![],
                     bio: None,
                     voice_muted: false,
+                    timeout_until: None,
                 })
                 .collect(),
             dms: self
@@ -770,6 +772,7 @@ mod tests {
                     forum: true,
                     audio_kbps: 0,
                     member_limit: 0,
+                    slow_mode_secs: 0,
                     focus_until: None,
                     flags: vec![],
                 }],

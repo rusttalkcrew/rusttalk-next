@@ -12,8 +12,9 @@ their expiry) are kept only in memory for at most 60 seconds. For automatic lock
 | Table | Columns |
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `avatar_initialized` (whether a picture was explicitly set or cleared), nullable `bio_ct` (the profile bio), `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (fifteen-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits), `events_enabled` (whether Events is on), `locked_down` and `locked_automatically` (lockdown, plain because it is a setting), nullable `lockdown_message_ct` (the optional notice for people turned away during a lockdown, sealed with a key derived from the server key like the public listing, because they hold no space key), `auto_lockdown_joins` and `auto_lockdown_secs` (automatic lockdown settings) |
+| `timeouts` | `person_id`, `ends_at` (Unix seconds when a moderator's timeout ends, plain because the server enforces it), nullable `reason_ct` (the moderator's reason, space-key ciphertext returned only to that member) |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (21-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits), `events_enabled` (whether Events is on), `new_member_secs` (how long the new member rules last after joining, 0 for off, plain because it is a setting), `locked_down` and `locked_automatically` (lockdown, plain because it is a setting), nullable `lockdown_message_ct` (the optional notice for people turned away during a lockdown, sealed with a key derived from the server key like the public listing, because they hold no space key), `auto_lockdown_joins` and `auto_lockdown_secs` (automatic lockdown settings) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview, nullable `created_by` (person ID of the member who made it) |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
@@ -25,7 +26,7 @@ their expiry) are kept only in memory for at most 60 seconds. For automatic lock
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
-| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), nullable `dm_first` and `dm_second` (person IDs) |
+| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), `forum` (whether a text channel is shown as posts with replies), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 320, plain because it is a setting rather than user-written content), `member_limit` (the most people in a voice channel at once, 0 for none, plain for the same reason), nullable `focus_until` (Unix seconds when a voice channel's focus mode ends, plain for the same reason), `slow_mode_secs` (how long each member waits between messages in a text channel, 0 for off, plain for the same reason), nullable `dm_first` and `dm_second` (person IDs) |
 | `channel_ids` | `id` (text, including event IDs and deleted channel IDs to prevent reuse) |
 | `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end), nullable `reminded_at` (Unix seconds) |
 | `calendar_answers` | `event_id`, `person` and `device` (public keys), `certificate` (public device certificate), `epoch`, `envelope` (signed space-key ciphertext of going or not going, always the same size) |
@@ -79,8 +80,11 @@ Servers don't learn who is friends with whom, who is blocked, or that a
 message is a friend request. They still see what they see for any DM: that
 the two people have one, and each message's size and time. A friend message
 is as large as a one-character text message.
-Blocking and "Friends only" work in the app: servers keep delivering those
-messages, and the app hides them or keeps them quiet.
+Blocking, message requests and "Friends only" work in the app: servers keep
+delivering those messages, and the app hides them or keeps them quiet.
+Accepting or deleting a message request is also kept in the sync blob only.
+The one thing a server adds for message requests is a count of the new DMs
+each person started there in the last hour, held in memory, to limit spam.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
@@ -331,7 +335,7 @@ the server IDs of official servers dismissed from the join page
 list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain), the camera resolution and frame rate, the dismissed official
-servers, "Allow DMs from" (`friends_only`), the default display name, the
+servers, "Allow DMs from" (`allow_dms`, and `friends_only` for older apps), the default display name, the
 bio and the servers with a name of their own sync to the person's other
 devices; the chosen microphone, speakers and camera stay on this device.
 `voice.json` also lists the servers this device still has to send a name or

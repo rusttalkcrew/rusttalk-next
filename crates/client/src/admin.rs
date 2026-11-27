@@ -5,6 +5,8 @@ mod emoji;
 mod file_limits;
 
 mod history;
+mod new_members;
+mod rate_limits;
 
 mod import;
 
@@ -13,6 +15,8 @@ mod lockdown;
 mod members;
 
 mod roles;
+
+pub mod timeout;
 
 use chrono::{DateTime, Local};
 use eframe::egui::{self, CollapsingHeader, ComboBox, DragValue, RichText, Ui, accesskit::Role};
@@ -38,11 +42,12 @@ const ICON_SIZE: f32 = 80.0;
 const HEADER_ICON: f32 = 40.0;
 
 /// Audit log filters: API action and label.
-fn filters() -> [(&'static str, &'static str); 9] {
+fn filters() -> [(&'static str, &'static str); 10] {
     [
         ("member_banned", t!("audit.filter_bans")),
         ("member_unbanned", t!("audit.filter_unbans")),
         ("member_kicked", t!("audit.filter_kicks")),
+        ("member_timed_out", t!("audit.filter_timeouts")),
         ("left", t!("audit.filter_leaves")),
         ("member_roles_changed", t!("audit.filter_roles")),
         ("joined", t!("audit.filter_joins")),
@@ -68,6 +73,10 @@ pub enum Tab {
     Files,
     /// How many messages each channel keeps.
     History,
+    /// How fast members may post, upload and so on.
+    RateLimits,
+    /// How long the new member rules last.
+    NewMembers,
     /// The owner's public listing.
     Listing,
     /// Server emoji.
@@ -104,6 +113,8 @@ pub struct Settings {
     joining: Option<(bool, u32)>,
     files: Option<file_limits::Form>,
     history: Option<history::Form>,
+    rate_limits: Option<rate_limits::Form>,
+    new_members: Option<new_members::Form>,
     lockdown: Option<lockdown::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
@@ -116,6 +127,10 @@ pub struct Settings {
     member: Option<(Id, MemberAction)>,
     /// The kick, ban or roles question was already on screen last frame.
     member_shown: bool,
+    /// "Also block them for me" on the ban question, and whom to block once the ban
+    /// went through.
+    also_block: bool,
+    block_after_ban: Option<Id>,
     members: members::View,
     roles: roles::RolesPage,
     invites: Vec<Invite>,
@@ -172,6 +187,14 @@ impl Settings {
                 Some(form) if form.unsaved() => form.saved(saved),
                 history => *history = Some(history::Form::new(saved)),
             },
+            AdminUpdate::RateLimits(saved) => match &mut self.rate_limits {
+                Some(form) if form.unsaved() => form.saved(saved),
+                limits => *limits = Some(rate_limits::Form::new(saved)),
+            },
+            AdminUpdate::NewMembers(saved) => match &mut self.new_members {
+                Some(form) if form.unsaved() => form.saved(saved),
+                rules => *rules = Some(new_members::Form::new(saved)),
+            },
             AdminUpdate::Listing(on, saved) => {
                 let saved = (on, saved.unwrap_or_default());
                 if !self.listing_unsaved() {
@@ -208,6 +231,7 @@ impl Settings {
             }
             AdminUpdate::Failed(text) => {
                 self.saving = None;
+                self.block_after_ban = None;
                 self.roles.failed();
                 self.emoji.failed();
                 if let Some(import) = &mut self.import {
@@ -216,6 +240,12 @@ impl Settings {
                 self.message = Some((text, true));
             }
         }
+    }
+
+    /// Whom to block now that a change went through: the person banned with
+    /// "Also block them for me".
+    pub fn banned_to_block(&mut self) -> Option<Id> {
+        self.block_after_ban.take()
     }
 
     fn joining_unsaved(&self) -> bool {
@@ -239,6 +269,8 @@ impl Settings {
             || (self.server_name.as_deref()).is_some_and(|typed| typed.trim() != name)
             || self.files.as_ref().is_some_and(file_limits::Form::unsaved)
             || self.history.as_ref().is_some_and(history::Form::unsaved)
+            || (self.rate_limits.as_ref()).is_some_and(rate_limits::Form::unsaved)
+            || (self.new_members.as_ref()).is_some_and(new_members::Form::unsaved)
             || self.lockdown.as_ref().is_some_and(lockdown::Form::unsaved)
             || self.joining_unsaved()
             || self.listing_unsaved()
@@ -341,6 +373,12 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::History {
         server.send(Command::Admin(Admin::LoadHistory));
     }
+    if tab == Tab::RateLimits {
+        server.send(Command::Admin(Admin::LoadRateLimits));
+    }
+    if tab == Tab::NewMembers {
+        server.send(Command::Admin(Admin::LoadNewMembers));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -354,6 +392,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         joining: None,
         files: None,
         history: None,
+        rate_limits: None,
+        new_members: None,
         lockdown: None,
         listing: None,
         saved_joining: None,
@@ -362,6 +402,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         updates: ServerUpdates::default(),
         member: None,
         member_shown: false,
+        also_block: false,
+        block_after_ban: None,
         members: members::View::default(),
         roles: roles::RolesPage::default(),
         invites: Vec::new(),
@@ -414,14 +456,25 @@ pub fn lockdown_banner(ui: &mut Ui, home: &mut Home, index: usize) {
 #[derive(Clone, Copy)]
 pub enum Moderate {
     Roles,
+    Timeout,
+    EndTimeout,
     Kick,
     Ban,
 }
 
-/// Menu items to kick, ban or change the roles of someone else, as allowed.
-pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms) {
+/// Menu items to change the roles of, time out, kick or ban someone else, as allowed.
+/// `timed_out`: they are in a timeout now, so it can be ended instead.
+pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms, timed_out: bool) {
     if perms.manage_roles && m.item("🏷", t!("admin.change_roles")).clicked() {
         *choice = Some(Moderate::Roles);
+    }
+    if perms.timeout_members {
+        if !timed_out && m.item("⏳", t!("timeout.menu")).clicked() {
+            *choice = Some(Moderate::Timeout);
+        }
+        if timed_out && m.item("⌛", t!("timeout.end")).clicked() {
+            *choice = Some(Moderate::EndTimeout);
+        }
     }
     if perms.kick && m.add(Item::new("👢", t!("admin.kick")).danger()).clicked() {
         *choice = Some(Moderate::Kick);
@@ -433,6 +486,13 @@ pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms
 
 /// Ask before kicking, or open settings for a ban or role change.
 pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
+    match choice {
+        Moderate::Timeout => return timeout::open(home, index, person),
+        Moderate::EndTimeout => {
+            return home.servers[index].send(Command::Admin(Admin::EndTimeout(person)));
+        }
+        _ => {}
+    }
     if matches!(choice, Moderate::Kick) {
         if home.kick.is_none() {
             let server = &home.servers[index];
@@ -460,6 +520,7 @@ pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
         settings.tab = Tab::Members;
         settings.member = Some((person, action));
         settings.message = None;
+        settings.also_block = false;
     }
 }
 
@@ -531,7 +592,9 @@ fn action(server: &Server, person: &Id, choice: Moderate) -> MemberAction {
                 .map(|m| m.roles.clone())
                 .unwrap_or_default(),
         ),
-        Moderate::Kick => unreachable!("Kick has its own confirmation"),
+        Moderate::Kick | Moderate::Timeout | Moderate::EndTimeout => {
+            unreachable!("handled in `moderate`")
+        }
         Moderate::Ban => MemberAction::Ban {
             network: false,
             remove: 0,
@@ -581,6 +644,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     page(Tab::Joining, "🚪", t!("admin.joining"), perms.admin),
                     page(Tab::Files, "📎", t!("admin.files"), true),
                     page(Tab::History, "💬", t!("admin.history"), true),
+                    page(Tab::RateLimits, "⏱", t!("admin.rate_limits"), true),
                     page(Tab::Emoji, "😀", t!("admin.emoji"), perms.manage_emoji),
                     page(Tab::Stickers, "🏷", t!("admin.stickers"), perms.manage_emoji),
                     page(Tab::Listing, "🌐", t!("admin.public_listing"), perms.owner),
@@ -603,6 +667,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             group(
                 t!("admin.moderation"),
                 vec![
+                    page(
+                        Tab::NewMembers,
+                        "🌱",
+                        t!("admin.new_members"),
+                        perms.manage_server,
+                    ),
                     page(
                         Tab::Lockdown,
                         "🔒",
@@ -670,6 +740,23 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             None
                         }
                     }
+                    Tab::RateLimits => {
+                        if let Some(form) = &mut settings.rate_limits {
+                            form.show(ui, perms.manage_server)
+                                .map(Admin::SaveRateLimits)
+                        } else {
+                            loading(ui, settings);
+                            None
+                        }
+                    }
+                    Tab::NewMembers => {
+                        if let Some(form) = &mut settings.new_members {
+                            form.show(ui).map(Admin::SaveNewMembers)
+                        } else {
+                            loading(ui, settings);
+                            None
+                        }
+                    }
                     Tab::Listing => listing_tab(ui, server, settings),
                     Tab::Lockdown => match &server.dir.lockdown {
                         Some(saved) => {
@@ -717,6 +804,8 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::Listing => Some(Admin::LoadListing),
                 Tab::Files => Some(Admin::LoadFiles),
                 Tab::History => Some(Admin::LoadHistory),
+                Tab::RateLimits => Some(Admin::LoadRateLimits),
+                Tab::NewMembers => Some(Admin::LoadNewMembers),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
@@ -1028,6 +1117,7 @@ fn members_tab<'a>(
                     ui.label(t!("admin.ban_help"));
                     ui::checkbox(ui, network, t!("admin.ban_network"));
                     ui.weak(t!("admin.ban_network_help"));
+                    ui::checkbox(ui, &mut settings.also_block, t!("admin.ban_also_block"));
                     if perms.remove_recent_messages {
                         remove_choice(ui, remove);
                     }
@@ -1035,6 +1125,7 @@ fn members_tab<'a>(
                         if danger(ui, t!("admin.ban")).clicked() {
                             let remove = (*remove > 0).then_some(*remove);
                             request = Some(Admin::Ban(person, *network, remove));
+                            settings.block_after_ban = settings.also_block.then_some(person);
                         }
                         cancel = ui::secondary(ui, t!("common.cancel")).clicked();
                     });
@@ -1249,6 +1340,22 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_unbanned" => t!("audit.member_unbanned", actor = actor, target = target),
         "member_kicked" => t!("audit.member_kicked", actor = actor, target = target),
         "voice_muted" => t!("audit.voice_muted", actor = actor, target = target),
+        "member_timed_out" => match entry.details["seconds"].as_i64() {
+            Some(seconds) => t!(
+                "audit.member_timed_out",
+                actor = actor,
+                target = target,
+                length = timeout::label(seconds)
+            ),
+            None => t!(
+                "audit.member_timed_out_plain",
+                actor = actor,
+                target = target
+            ),
+        },
+        "member_timeout_ended" => {
+            t!("audit.member_timeout_ended", actor = actor, target = target)
+        }
         "voice_unmuted" => t!("audit.voice_unmuted", actor = actor, target = target),
         "voice_removed" => t!("audit.voice_removed", actor = actor, target = target),
         "voice_moved" => t!("audit.voice_moved", actor = actor, target = target),
@@ -1256,6 +1363,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_roles_changed" => t!("audit.member_roles_changed", actor = actor, target = target),
         "server_updated" => t!("audit.server_updated", actor = actor),
         "file_limits_changed" => t!("audit.file_limits_changed", actor = actor),
+        "new_member_rules_changed" => t!("audit.new_member_rules_changed", actor = actor),
         "listing_changed" if entry.details["enabled"] == true => t!("audit.listed", actor = actor),
         "listing_changed" => t!("audit.unlisted", actor = actor),
         "lockdown_started" => t!("audit.lockdown_started", actor = actor),
@@ -1298,6 +1406,14 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
             ),
             None => t!("audit.channel_permissions_changed", actor = actor),
         },
+        "slow_mode_changed" => t!(
+            "audit.slow_mode_changed",
+            actor = actor,
+            channel = entry
+                .target_id
+                .and_then(|id| server.channel(&id))
+                .map_or_else(|| t!("audit.a_channel").into(), |c| format!("#{}", c.name))
+        ),
         "category_created" => t!("audit.category_created", actor = actor),
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),
@@ -1380,9 +1496,20 @@ fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
             })
             .map(str::to_owned)
             .collect(),
+        "slow_mode_changed" => {
+            let secs = |key: &str| details[key].as_u64().map(|secs| secs as u32);
+            let (before, after) = (secs("before")?, secs("after")?);
+            let label = crate::home::slow_mode::label;
+            vec![format!("{} → {}", label(before), label(after))]
+        }
         "file_limits_changed" => {
             let limits = |key: &str| serde_json::from_value(details[key].clone()).ok();
             file_limits::changes(limits("before")?, limits("after")?)
+        }
+        "new_member_rules_changed" => {
+            let (before, after) = (details["before"].as_i64()?, details["after"].as_i64()?);
+            let label = new_members::label;
+            vec![format!("{} → {}", label(before), label(after))]
         }
         "auto_lockdown_changed" => {
             let spike = |key: &str| spike(&details[key]);

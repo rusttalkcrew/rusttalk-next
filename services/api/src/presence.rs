@@ -304,6 +304,7 @@ pub async fn set(
 ) -> ApiResult<StatusCode> {
     let Choice { status, picked } = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    app.limits.check(&actor, crate::limits::Action::Presence)?;
     let (person, device) = (encode(&actor.person), encode(&actor.device));
     // Older apps send "away" by themselves after a while without input and "online"
     // once used again, so their "away" counts as that device being idle.
@@ -348,6 +349,7 @@ pub async fn idle(
     let Idle { idle } = payload(body)?;
     let (tx, actor) = authenticate_read(&app, &headers).await?;
     drop(tx);
+    app.limits.check(&actor, crate::limits::Action::Presence)?;
     set_idle(&app, &encode(&actor.person), encode(&actor.device), idle);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -379,6 +381,7 @@ pub async fn set_hide_offline(
 ) -> ApiResult<StatusCode> {
     let HideOffline { hide_offline } = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
+    app.limits.check(&actor, crate::limits::Action::Presence)?;
     query("UPDATE members SET hide_offline = ? WHERE person_id = ?")
         .bind(hide_offline)
         .bind(actor.person.as_slice())

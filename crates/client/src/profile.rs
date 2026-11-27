@@ -33,6 +33,22 @@ pub fn fit_bio(text: &str) -> String {
     lines.join("\n").chars().take(BIO_CHARS).collect()
 }
 
+/// Why `name` can't be saved, if it can't: it holds a link or invite, which every
+/// member would see (#658).
+pub fn name_problem(name: &str) -> Option<String> {
+    rusttalk_core::names::contains_link(name).then(|| t!("names.no_links").into())
+}
+
+/// Someone else's name as decrypted: one holding a link is dropped, so they show as
+/// "Member ####", and an overlong one is cut to what the name fields allow.
+pub fn received_name(name: Option<String>) -> Option<String> {
+    let name = name.filter(|name| !rusttalk_core::names::contains_link(name))?;
+    Some(match name.char_indices().nth(NAME_CHARS) {
+        Some((end, _)) => format!("{}…", &name[..end]),
+        None => name,
+    })
+}
+
 /// The bio as it is saved.
 pub fn clean_bio(text: &str) -> String {
     fit_bio(text.trim()).trim_end().to_owned()
@@ -204,6 +220,18 @@ mod tests {
 
     fn server(n: u8) -> Url {
         format!("https://server{n}.test/").parse().unwrap()
+    }
+
+    #[test]
+    fn received_names_drop_links_and_stay_short() {
+        assert_eq!(received_name(Some("Ann".into())).as_deref(), Some("Ann"));
+        assert_eq!(received_name(Some("rusttalk://a.test/i/x#y".into())), None);
+        assert_eq!(received_name(Some("go www.a.test".into())), None);
+        assert_eq!(received_name(None), None);
+        let long = received_name(Some("é".repeat(NAME_CHARS + 5))).unwrap();
+        assert_eq!(long, format!("{}…", "é".repeat(NAME_CHARS)));
+        assert!(name_problem("J. Smith").is_none());
+        assert!(name_problem("https://a.test").is_some());
     }
 
     #[test]

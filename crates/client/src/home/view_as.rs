@@ -80,6 +80,8 @@ pub fn preview(real: &Directory, roles: &[String]) -> Directory {
         create_events: mine.create_events && grants("create_events"),
         manage_events: mine.manage_events && grants("manage_events"),
         start_focus: mine.start_focus && grants("start_focus"),
+        bypass_slow_mode: mine.bypass_slow_mode && grants("bypass_slow_mode"),
+        timeout_members: mine.timeout_members && grants("timeout_members"),
         lock_down: mine.lock_down && grants("lock_down"),
         remove_recent_messages: mine.remove_recent_messages && grants("remove_recent_messages"),
         rank: (roles.iter().map(|role| role.rank).max())
@@ -315,6 +317,7 @@ mod tests {
             forum: false,
             audio_kbps: 0,
             member_limit: 0,
+            slow_mode_secs: 0,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 3)).collect(),
         }
@@ -360,6 +363,7 @@ mod tests {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             }]
             .into(),
             ..Directory::default()

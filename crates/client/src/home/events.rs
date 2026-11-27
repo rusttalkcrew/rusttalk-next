@@ -1294,6 +1294,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         server.dir.members = vec![member(ME), member(ANN), member(BOB), member(CID)].into();
         server.dir.categories = vec![Category {
@@ -1308,6 +1309,7 @@ mod tests {
                 forum: false,
                 audio_kbps: 64,
                 member_limit: 0,
+                slow_mode_secs: 0,
                 focus_until: None,
                 flags: Vec::new(),
             }],

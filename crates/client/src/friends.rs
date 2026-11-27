@@ -28,6 +28,29 @@ pub enum Relation {
     Blocked,
 }
 
+/// Who may message this person directly (#666). Their own devices sort DMs by it;
+/// servers aren't told, since they don't know who is a friend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowDms {
+    /// Anyone they share a server with, straight into their DMs.
+    Everyone,
+    /// The same people, but those who aren't friends wait under Message requests.
+    #[default]
+    Requests,
+    /// Friends only: other people's DMs stay hidden.
+    Friends,
+}
+
+/// Where a DM with someone goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sort {
+    Shown,
+    /// Under Message requests: no sound, no unread marks.
+    Request,
+    Hidden,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Contact {
     pub relation: Relation,
@@ -45,6 +68,14 @@ pub struct Contact {
     /// reload doesn't apply again.
     #[serde(default)]
     pub seen: Vec<String>,
+    /// Their DMs go to the normal list although they aren't friends: this person
+    /// accepted their message request, or wrote to them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accepted: bool,
+    /// The server time of their newest message when this person deleted their
+    /// request; it stays away until they write again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed: Option<i64>,
 }
 
 /// Something this person does about someone.
@@ -71,6 +102,10 @@ impl Friends {
         self.contacts
             .get(person)
             .map_or(Relation::None, |contact| contact.relation)
+    }
+
+    pub fn is_blocked(&self, person: &Id) -> bool {
+        self.relation(person) == Relation::Blocked
     }
 
     pub fn contacts(&self) -> impl Iterator<Item = (&Id, &Contact)> {
@@ -194,19 +229,43 @@ impl Friends {
         }
     }
 
-    /// Whether a DM from them belongs under "Message requests": the person allows DMs
-    /// from friends only, and they aren't one (or asked by this person).
-    pub fn is_request(&self, person: &Id, friends_only: bool) -> bool {
-        friends_only && !matches!(self.relation(person), Relation::Friend | Relation::Outgoing)
+    /// Where a DM with them goes. `newest` is the server time of their newest message
+    /// loaded, so a deleted request comes back only when they write again.
+    pub fn sort(&self, person: &Id, allow: AllowDms, newest: Option<i64>) -> Sort {
+        let none = Contact::default();
+        let contact = self.contacts.get(person).unwrap_or(&none);
+        match contact.relation {
+            Relation::Blocked => Sort::Hidden,
+            // Friends, and people this person asked.
+            Relation::Friend | Relation::Outgoing => Sort::Shown,
+            _ if contact.accepted || allow == AllowDms::Everyone => Sort::Shown,
+            _ if allow == AllowDms::Friends => Sort::Hidden,
+            _ if (contact.dismissed).is_some_and(|at| newest.is_none_or(|new| new <= at)) => {
+                Sort::Hidden
+            }
+            _ => Sort::Request,
+        }
     }
 
-    /// People with a DM, in order, split into the normal list and message requests.
-    /// Blocked people are in neither.
-    pub fn split(&self, peers: &[Id], friends_only: bool) -> (Vec<Id>, Vec<Id>) {
-        let shown = peers
-            .iter()
-            .filter(|peer| self.relation(peer) != Relation::Blocked);
-        shown.partition(|peer| !self.is_request(peer, friends_only))
+    /// Let their DMs into the normal list. False when they already were.
+    pub fn accept(&mut self, person: Id, name: &str, now: i64) -> bool {
+        let contact = self.contacts.entry(person).or_default();
+        if contact.accepted {
+            return false;
+        }
+        contact.accepted = true;
+        contact.dismissed = None;
+        let relation = contact.relation;
+        self.set(person, relation, name, now);
+        true
+    }
+
+    /// Delete their message request, up to their newest message (server time).
+    pub fn dismiss(&mut self, person: Id, newest: Option<i64>, name: &str, now: i64) {
+        let contact = self.contacts.entry(person).or_default();
+        contact.dismissed = Some(newest.unwrap_or(i64::MIN));
+        let relation = contact.relation;
+        self.set(person, relation, name, now);
     }
 }
 
@@ -320,22 +379,49 @@ mod tests {
         assert_eq!(me.relation(&ANA), R::None);
         // Blocked people don't show at all.
         let cy = [3; 32];
-        assert_eq!(me.split(&[ANA, bo, cy], false), (vec![ANA, cy], vec![]));
+        assert_eq!(me.sort(&bo, AllowDms::Everyone, None), Sort::Hidden);
+        assert_eq!(me.sort(&cy, AllowDms::Everyone, None), Sort::Shown);
     }
 
     #[test]
-    fn friends_only_moves_other_dms_to_requests() {
+    fn who_may_dm_sorts_strangers() {
+        use {AllowDms as D, Sort::*};
         let mut me = Friends::default();
-        let (bo, cy, di) = ([2; 32], [3; 32], [4; 32]);
+        let (bo, cy) = ([2; 32], [3; 32]);
         me.receive(ANA, msg(1, 100, S::Request), "Ana", 1);
         me.act(ANA, A::Accept, "Ana", 2);
         me.act(bo, A::Add, "Bo", 3);
-        me.act(di, A::Block, "Di", 4);
-        let peers = [cy, ANA, bo, di];
-        assert_eq!(me.split(&peers, false), (vec![cy, ANA, bo], vec![]));
-        assert_eq!(me.split(&peers, true), (vec![ANA, bo], vec![cy]));
-        assert!(me.is_request(&cy, true) && !me.is_request(&cy, false));
-        assert!(!me.is_request(&ANA, true));
+        for allow in [D::Everyone, D::Requests, D::Friends] {
+            assert_eq!(me.sort(&ANA, allow, None), Shown);
+            assert_eq!(me.sort(&bo, allow, None), Shown);
+        }
+        assert_eq!(me.sort(&cy, D::Everyone, Some(5)), Shown);
+        assert_eq!(me.sort(&cy, D::Requests, Some(5)), Request);
+        assert_eq!(me.sort(&cy, D::Friends, Some(5)), Hidden);
+        // Someone asking to be friends waits too, until the answer.
+        me.receive(cy, msg(2, 100, S::Request), "Cy", 4);
+        assert_eq!(me.sort(&cy, D::Requests, Some(5)), Request);
+    }
+
+    #[test]
+    fn accepting_and_deleting_requests() {
+        use {AllowDms::Requests, Sort::*};
+        let mut me = Friends::default();
+        me.dismiss(ANA, Some(50), "Ana", 1);
+        assert_eq!(me.sort(&ANA, Requests, Some(50)), Hidden);
+        assert_eq!(me.sort(&ANA, Requests, None), Hidden);
+        // They wrote again.
+        assert_eq!(me.sort(&ANA, Requests, Some(51)), Request);
+        assert!(me.accept(ANA, "Ana", 2));
+        assert!(!me.accept(ANA, "Ana", 3));
+        assert_eq!(me.sort(&ANA, Requests, Some(51)), Shown);
+        assert_eq!(me.sort(&ANA, AllowDms::Friends, Some(51)), Shown);
+        // Other devices take it, and blocking still wins.
+        let mut desk = Friends::default();
+        desk.adopt(&synced(&mut me));
+        assert_eq!(desk.sort(&ANA, Requests, Some(51)), Shown);
+        desk.act(ANA, A::Block, "Ana", 4);
+        assert_eq!(desk.sort(&ANA, Requests, Some(51)), Hidden);
     }
 
     #[test]

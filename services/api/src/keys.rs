@@ -808,6 +808,7 @@ mod tests {
             hide_offline: false,
             avatar_initialized: true,
             voice_muted: false,
+            timeout_until: None,
         };
         let inline = |event: Event| match event {
             Event::MemberChanged { profile, .. } => profile.is_some(),

@@ -3,7 +3,10 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{FileLimits, FileSettings, MessageHistory, ServerUpdates, decode, encode},
+    auth::{
+        FileLimits, FileSettings, MessageHistory, NewMemberRules, RateLimitPreset, RateLimits,
+        ServerUpdates, decode, encode,
+    },
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -22,6 +25,13 @@ pub enum Admin {
     },
     SystemMessages(crate::server::SystemMessages),
     Kick(Id),
+    /// Stop someone from writing and talking for `seconds`, with an optional reason.
+    Timeout {
+        person: Id,
+        seconds: i64,
+        reason: Option<String>,
+    },
+    EndTimeout(Id),
     /// Mute (`true`) or unmute someone in every voice channel.
     VoiceMute(Id, bool),
     /// Disconnect someone from a voice channel, or (`Some`) move them to another.
@@ -71,6 +81,11 @@ pub enum Admin {
     LoadHistory,
     /// How many messages each channel keeps; 0 keeps them all.
     SaveHistory(i64),
+    LoadRateLimits,
+    SaveRateLimits(RateLimitPreset),
+    LoadNewMembers,
+    /// How long the new member rules last after joining, in seconds; 0 is off.
+    SaveNewMembers(i64),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -174,6 +189,10 @@ pub enum AdminUpdate {
     Files(FileSettings),
     /// `None` from a server too old to change it.
     History(Option<MessageHistory>),
+    /// `None` from a server too old to change it.
+    RateLimits(Option<RateLimits>),
+    /// `None` from a server too old to have new member rules.
+    NewMembers(Option<NewMemberRules>),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -329,20 +348,54 @@ async fn change(
                 t!("admin.done_file_limits")
             }),
         Admin::LoadHistory => {
-            match message_history(client, Method::GET, None).await {
+            match newer_setting(client, HISTORY, Method::GET, None).await {
                 Ok(history) => send(AdminUpdate::History(history)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
             return None;
         }
         Admin::SaveHistory(keep) => {
-            message_history(client, Method::PUT, Some(json!({ "keep": keep })))
+            newer_setting(client, HISTORY, Method::PUT, Some(json!({ "keep": keep })))
                 .await
                 .map(|history| {
                     send(AdminUpdate::History(history));
                     t!("admin.done_history")
                 })
         }
+        Admin::LoadRateLimits => {
+            match newer_setting(client, RATE_LIMITS, Method::GET, None).await {
+                Ok(limits) => send(AdminUpdate::RateLimits(limits)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return None;
+        }
+        Admin::LoadNewMembers => {
+            match newer_setting(client, NEW_MEMBERS, Method::GET, None).await {
+                Ok(rules) => send(AdminUpdate::NewMembers(rules)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return None;
+        }
+        Admin::SaveRateLimits(preset) => {
+            let body = Some(json!({ "preset": preset }));
+            newer_setting(client, RATE_LIMITS, Method::PUT, body)
+                .await
+                .map(|limits| {
+                    send(AdminUpdate::RateLimits(limits));
+                    t!("admin.done_rate_limits")
+                })
+        }
+        Admin::SaveNewMembers(secs) => newer_setting(
+            client,
+            NEW_MEMBERS,
+            Method::PUT,
+            Some(json!({ "secs": secs })),
+        )
+        .await
+        .map(|rules| {
+            send(AdminUpdate::NewMembers(rules));
+            t!("admin.done_new_members")
+        }),
         Admin::LoadUpdates => {
             match get(client, "/v1/settings/updates").await {
                 Ok(value) => match serde_json::from_value(value) {
@@ -387,6 +440,37 @@ async fn change(
         )
         .await
         .map(|()| t!("admin.done_kicked")),
+        Admin::Timeout {
+            person,
+            seconds,
+            reason,
+        } => {
+            let reason_ct = reason
+                .map(|reason| {
+                    client.encrypt_metadata(Metadata::TimeoutReason, &person, reason.as_bytes())
+                })
+                .transpose()
+                .map_err(|error| failed(&error));
+            match reason_ct {
+                Ok(reason_ct) => call(
+                    client,
+                    Method::PUT,
+                    &format!("/v1/members/{}/timeout", encode(&person)),
+                    Some(json!({ "seconds": seconds, "reason_ct": reason_ct })),
+                )
+                .await
+                .map(|()| t!("timeout.done")),
+                Err(text) => Err(text),
+            }
+        }
+        Admin::EndTimeout(person) => call(
+            client,
+            Method::DELETE,
+            &format!("/v1/members/{}/timeout", encode(&person)),
+            None,
+        )
+        .await
+        .map(|()| t!("timeout.done_ended")),
         Admin::VoiceMute(person, on) => {
             let method = if on { Method::PUT } else { Method::DELETE };
             let path = format!("/v1/members/{}/voice-mute", encode(&person));
@@ -1007,22 +1091,27 @@ async fn file_settings(
         .map_err(|error| failed(&error.into()))
 }
 
-/// `None` when the server predates the setting.
-async fn message_history(
+const HISTORY: &str = "/v1/settings/message-history";
+const NEW_MEMBERS: &str = "/v1/settings/new-member-rules";
+
+const RATE_LIMITS: &str = "/v1/settings/rate-limits";
+
+/// A setting older servers lack: `None` when the server predates it.
+async fn newer_setting<T: serde::de::DeserializeOwned>(
     client: &KeyClient<'_>,
+    path: &str,
     method: Method,
     body: Option<Value>,
-) -> Result<Option<MessageHistory>, String> {
-    const PATH: &str = "/v1/settings/message-history";
+) -> Result<Option<T>, String> {
     let reply = if method == Method::GET {
-        match client.request(Method::GET, PATH).send().await {
+        match client.request(Method::GET, path).send().await {
             Ok(reply) if reply.status() == reqwest::StatusCode::NOT_FOUND => return Ok(None),
             Ok(reply) if reply.status().is_success() => reply,
             // Ask again through `request`, which puts the problem into words.
-            _ => request(client, method, PATH, body).await?,
+            _ => request(client, method, path, body).await?,
         }
     } else {
-        request(client, method, PATH, body).await?
+        request(client, method, path, body).await?
     };
     reply
         .json()
@@ -1076,6 +1165,7 @@ fn problem(code: &str) -> &'static str {
             t!("admin.no_active_ip")
         }
         "member_not_found" => t!("admin.member_not_found"),
+        "timeout_not_found" => t!("timeout.not_found"),
         "not_in_voice" => t!("admin.not_in_voice"),
         "voice_move_denied" => t!("admin.voice_move_denied"),
         "ban_not_found" => t!("admin.ban_not_found"),
@@ -1083,6 +1173,8 @@ fn problem(code: &str) -> &'static str {
         "invalid_member_cap" => t!("admin.invalid_member_cap"),
         "invalid_file_limits" => t!("admin.invalid_file_limits"),
         "invalid_message_history" => t!("admin.invalid_message_history"),
+        "invalid_new_member_rules" => t!("admin.invalid_new_members"),
+        "new_member_rules" => t!("new_members.refused"),
         "invalid_listing" | "invalid_listing_settings" => {
             t!("admin.invalid_listing")
         }

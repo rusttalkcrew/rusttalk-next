@@ -15,7 +15,7 @@ use reqwest::StatusCode;
 use rusttalk_core::{
     client::{
         Attachment, BlobRef, FileClient, KeyClient, MessageBody, MessageError, Progress,
-        UploadRejected, decode_frames, decode_thumbnail,
+        RateLimited, UploadRejected, decode_frames, decode_thumbnail,
     },
     messages::fit_file_name,
 };
@@ -35,7 +35,7 @@ use crate::{
     sticker_files::{Inline, Kind},
 };
 use rusttalk_core::client::prepare_file;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// At most this many downloads run at once per server; the others wait their turn.
 const DOWNLOADS: usize = 4;
@@ -415,7 +415,19 @@ pub(super) async fn post(
     mut body: MessageBody,
     (kept, mut leftover): (usize, Vec<Attachment>),
 ) -> Result<bool> {
-    let mut posted = post_once(client, &channel, id, page, &body).await;
+    let mut pacing = Pacing::default();
+    let mut posted = loop {
+        let posted = post_once(client, &channel, id, page, &body).await;
+        let Some(wait) = pacing.wait(&posted) else {
+            break posted;
+        };
+        ctx.send(Update::SlowDown(url.clone(), channel, true));
+        tracing::info!(?wait, "message rate limited; sending again shortly");
+        tokio::time::sleep(wait).await;
+    };
+    if pacing.tries > 0 {
+        ctx.send(Update::SlowDown(url.clone(), channel, false));
+    }
     // The other person re-keyed the DM just now: take the new key and send once more,
     // whatever this was (text, sticker, file or friend message).
     if dm && posted.as_ref().is_err_and(conflict) {
@@ -468,6 +480,29 @@ pub(super) async fn post(
     state.sent(ctx, url, channel, &record, &posted_body);
     at_most(CLEANUP, discard(&client.file_client(), &leftover)).await;
     Ok(true)
+}
+
+/// How often, and how long at most, a message waits when the server asks to slow down.
+/// It waits on this server's loop, so later messages keep their order; events still
+/// get their turn between messages. A longer wait gives the message back instead.
+const SLOW_DOWN_TRIES: u32 = 5;
+const SLOW_DOWN_WAIT: Duration = Duration::from_secs(10);
+
+/// A message's tries while the server asks it to slow down.
+#[derive(Default)]
+pub(super) struct Pacing {
+    tries: u32,
+}
+
+impl Pacing {
+    /// How long to wait before sending again after `result`; `None` to stop here.
+    pub(super) fn wait<T>(&mut self, result: &Result<T>) -> Option<Duration> {
+        let limited = result.as_ref().err()?.downcast_ref::<RateLimited>()?;
+        (self.tries < SLOW_DOWN_TRIES && limited.0 <= SLOW_DOWN_WAIT).then(|| {
+            self.tries += 1;
+            limited.0
+        })
+    }
 }
 
 async fn post_once(
@@ -1057,6 +1092,7 @@ fn upload_problem(error: &anyhow::Error) -> String {
         (_, Some("file_too_large")) => t!("files.err_too_large"),
         (_, Some("file_member_quota")) => t!("files.err_member_quota"),
         (_, Some("file_server_quota")) => t!("files.err_server_quota"),
+        (_, Some("new_member_rules")) => t!("new_members.refused"),
         (Some(StatusCode::PAYLOAD_TOO_LARGE), _) => {
             t!("files.err_no_room")
         }
@@ -1081,6 +1117,26 @@ fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_the_server_slowed_down_is_sent_again_after_retry_after() {
+        let limited = |seconds| Err::<(), _>(RateLimited(Duration::from_secs(seconds)).into());
+        let mut pacing = Pacing::default();
+        // Kept and sent again after the server's Retry-After, a few times.
+        for _ in 0..SLOW_DOWN_TRIES {
+            assert_eq!(pacing.wait(&limited(2)), Some(Duration::from_secs(2)));
+        }
+        // Then it goes back to the composer, as when the server keeps refusing.
+        assert_eq!(pacing.wait(&limited(2)), None);
+
+        // A long wait (such as a new DM an hour) gives it back at once; it isn't held up.
+        let long = SLOW_DOWN_WAIT.as_secs() + 1;
+        assert_eq!(Pacing::default().wait(&limited(long)), None);
+        // Sent, or refused for another reason: nothing to wait for.
+        assert_eq!(Pacing::default().wait(&Ok(())), None);
+        let other = Err::<(), _>(anyhow::anyhow!("offline"));
+        assert_eq!(Pacing::default().wait(&other), None);
+    }
 
     fn prepared() -> Option<(Attachment, Option<Vec<u8>>)> {
         let (attachment, thumbnail) = prepare_file(FILE_NAME, MEDIA_TYPE, b"{}", b"").unwrap();

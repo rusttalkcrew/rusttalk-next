@@ -144,6 +144,39 @@ pub struct MessageHistory {
     pub ceiling: Option<i64>,
 }
 
+/// How fast each member may act before the server asks them to slow down (429).
+/// Ordered from strictest to loosest, so a host cap is the smaller of the two.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitPreset {
+    Strict,
+    #[default]
+    Standard,
+    Relaxed,
+}
+
+/// The server's rate limits (`/v1/settings/rate-limits`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimits {
+    pub preset: RateLimitPreset,
+    /// The loosest preset the server's host allows, when it set one (`RUSTTALK_RATE_LIMITS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<RateLimitPreset>,
+}
+
+/// New member rules (`/v1/settings/new-member-rules`): for `secs` after joining, members
+/// with only the default role can't upload files, start DMs, mention everyone or roles, or
+/// create invites. 0 is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewMemberRules {
+    pub secs: i64,
+}
+
+impl NewMemberRules {
+    /// The longest period: 30 days.
+    pub const MAX_SECS: i64 = 30 * 86_400;
+}
+
 /// Operational update status visible to the server owner.
 #[derive(Default, Serialize, Deserialize)]
 pub struct ServerUpdates {
