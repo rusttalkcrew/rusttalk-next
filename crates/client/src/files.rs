@@ -202,6 +202,9 @@ struct Viewer {
     file: Attachment,
     commands: UnboundedSender<Command>,
     zoom: f32,
+    /// How far the zoomed picture is scrolled, kept so wheel zoom can hold the
+    /// point under the mouse in place.
+    offset: Vec2,
     /// Quarter turns clockwise.
     turns: u8,
     /// Opened from a gallery: its pictures, newest first, and which one shows.
@@ -371,6 +374,7 @@ impl Files {
             file: file.clone(),
             commands: commands.clone(),
             zoom: 1.0,
+            offset: Vec2::ZERO,
             turns: 0,
             album: None,
         });
@@ -2348,7 +2352,9 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.add_space(8.0);
                 let room = ui.available_size();
                 let stage = ui.available_rect_before_wrap();
-                // The scroll wheel (or a pinch) over the picture zooms; sideways still pans.
+                // The scroll wheel (or a pinch) over the picture zooms toward the mouse;
+                // sideways still pans.
+                let mut anchor = None;
                 if ui.rect_contains_pointer(stage) {
                     let factor = ctx.input_mut(|input| {
                         let wheel = std::mem::take(&mut input.smooth_scroll_delta.y);
@@ -2357,11 +2363,14 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     if factor != 1.0
                         && let Some(view) = files.viewer.as_mut()
                     {
+                        let before = view.zoom;
                         view.zoom = (view.zoom * factor).clamp(0.25, 8.0);
+                        anchor = ctx.pointer_hover_pos().map(|at| (at - stage.min, before));
                     }
                 }
                 let view = files.viewer.as_ref().expect("checked above");
                 let mut picture = None;
+                let mut scrolled = None;
                 match files.full.as_ref().map(|full| &full.picture) {
                     Some(Picture::Ready(anim)) => {
                         let texture = anim.current(ui, true);
@@ -2375,7 +2384,16 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         let fit = (room.x / outline.x).min(room.y / outline.y).min(1.0);
                         let scale = fit * view.zoom;
                         let area = (outline * scale).max(room);
-                        ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                        let mut scroll = ScrollArea::both().auto_shrink(false);
+                        if let Some((at, before)) = anchor {
+                            // Keep the picture point under the mouse where it is.
+                            let old_scale = fit * before;
+                            let old_area = (outline * old_scale).max(room);
+                            let point = (view.offset + at - old_area / 2.0) / old_scale;
+                            let target = point * scale + area / 2.0 - at;
+                            scroll = scroll.scroll_offset(target.max(Vec2::ZERO));
+                        }
+                        let shown = scroll.show(ui, |ui| {
                             let (rect, _) = ui.allocate_exact_size(area, Sense::hover());
                             // Match the painted bounds, including rotation and scroll offset.
                             let displayed = Rect::from_center_size(rect.center(), outline * scale);
@@ -2389,6 +2407,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                                 .rotate(f32::from(view.turns) * FRAC_PI_2, Vec2::splat(0.5))
                                 .paint_at(ui, unturned);
                         });
+                        scrolled = Some(shown.state.clamped_offset());
                     }
                     Some(Picture::Gone) => {
                         ui.label(RichText::new(t!("call.no_longer_available")).color(OVERLAY_TEXT));
@@ -2399,6 +2418,9 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     _ => {
                         ui.centered_and_justified(|ui| ui.spinner());
                     }
+                }
+                if let (Some(offset), Some(view)) = (scrolled, files.viewer.as_mut()) {
+                    view.offset = offset;
                 }
                 // The picture's menu: right click, or a long press on a touch screen.
                 if let Some(picture) = picture {
