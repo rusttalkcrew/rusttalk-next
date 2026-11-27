@@ -406,8 +406,10 @@ pub fn phone_control_count(home: &mut Home) -> usize {
 /// The floating bar's buttons and the chevrons beside them.
 const BAR_BUTTON: f32 = ui::TOUCH_TARGET;
 const BAR_CHEVRON: f32 = 18.0;
+/// The strip under the call view that holds the floating bar, with its margins.
+pub const STAGE_BAR_HEIGHT: f32 = BAR_BUTTON + 2.0 * SPACE_XS + 2.0 * ui::SPACE_S;
 
-/// The call's controls in a pill floating at the bottom of the call view (`area`) on
+/// The call's controls in a pill centered in `area`, the strip under the call view, on
 /// tablets and computers: mic, sound, camera and screen, each with a chevron for its
 /// choices, "More" and hang up. The same buttons as the voice panel. Returns the bar's
 /// rect so the stage can keep its own clicks out of it.
@@ -429,10 +431,7 @@ pub fn stage_controls(ui: &mut Ui, home: &mut Home, area: Rect) -> Option<Rect> 
         ((room - (gaps - chevrons as f32 * SPACE_XS)) / buttons as f32).max(ui::ICON_BUTTON)
     };
     let height = BAR_BUTTON + 2.0 * SPACE_XS;
-    let rect = Rect::from_center_size(
-        egui::pos2(area.center().x, area.bottom() - ui::SPACE_S - height / 2.0),
-        Vec2::new(width + 2.0 * SPACE_XS, height),
-    );
+    let rect = Rect::from_center_size(area.center(), Vec2::new(width + 2.0 * SPACE_XS, height));
     let c = ui::colors(ui);
     let round = egui::CornerRadius::same((height / 2.0) as u8);
     ui.painter().rect_filled(rect, round, c.side);
