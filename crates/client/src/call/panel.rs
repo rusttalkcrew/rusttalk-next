@@ -280,8 +280,9 @@ fn even(ui: &Ui, count: usize, height: f32) -> Vec2 {
     Vec2::new(width, height)
 }
 
-/// The voice panel, while in a voice room.
-pub fn call_bar(ui: &mut Ui, home: &mut Home) {
+/// The voice panel, while in a voice room. `short`: a window too low for all of it (a
+/// phone held sideways) keeps only one row of buttons, with hang up at its end.
+pub fn call_bar(ui: &mut Ui, home: &mut Home, short: bool) {
     if home.voice.call.is_none() {
         return;
     }
@@ -347,6 +348,17 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         .inner_margin(Margin::same(ui::SPACE_S as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if short {
+                let extras = Extras::of(&mut home.voice, true);
+                let size = even(ui, extras.count() + 1, ICON_BUTTON);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
+                    share_buttons(ui, &mut home.voice, &can, &extras, size, &mut picked);
+                    picked.leave = leave_button(ui, size).clicked();
+                });
+                picked.live = live_files(ui, &home.voice.live_files, server);
+                return;
+            }
             ui::right_row(ui, ICON_BUTTON, |ui| {
                 picked.leave = leave_button(ui, SIGNAL_SIZE).clicked();
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {

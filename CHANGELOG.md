@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

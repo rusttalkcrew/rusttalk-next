@@ -499,3 +499,27 @@ fn turning_the_phone_keeps_your_camera_in_full_screen() {
     capture(&mut h, Vec2::new(844.0, 390.0), true, "self-view-turned");
     assert!(self_view(&h), "sideways");
 }
+
+/// A phone held sideways: the voice panel keeps to one row, so the channel list and
+/// the rail keep room (#693).
+#[test]
+fn a_low_window_keeps_room_for_the_channels() {
+    let data = tempfile::tempdir().unwrap();
+    for (size, short) in [
+        (Vec2::new(914.0, 380.0), true),
+        (Vec2::new(1100.0, 700.0), false),
+    ] {
+        let mut h = sharing(true, size, data.path());
+        h.run_steps(10);
+        capture(&mut h, size, true, "sidebar");
+        // The status line with its signal and place shows only when there is room.
+        let status = h
+            .query_by_label_contains(t!("call.voice_connected"))
+            .is_some();
+        assert_eq!(status, !short, "{size:?}");
+        assert!(h.query_by_label(t!("call.leave")).is_some(), "{size:?}");
+        // The sidebar's voice panel starts below the middle, leaving the list room.
+        let leave = h.get_by_label(t!("call.leave")).rect();
+        assert!(!short || leave.top() > size.y * 0.6, "{size:?} {leave:?}");
+    }
+}

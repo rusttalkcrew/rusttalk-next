@@ -75,6 +75,8 @@ const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
 const RAIL_WIDTH: f32 = 72.0;
+/// Below this height the sidebar's voice panel keeps to one row of buttons.
+const SHORT_SIDEBAR: f32 = 480.0;
 const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
@@ -2536,6 +2538,8 @@ fn sidebar_column(
     channels_width: f32,
 ) -> Rect {
     let colors = ui::colors(ui);
+    // A phone held sideways: the voice panel would leave the channel list a sliver.
+    let short = ui.available_height() < SHORT_SIDEBAR;
     Panel::left("sidebar")
         .resizable(false)
         .exact_size(RAIL_WIDTH + channels_width)
@@ -2543,9 +2547,11 @@ fn sidebar_column(
         .show(ui, |ui| {
             Panel::bottom("you")
                 .frame(panel_frame(colors.side))
-                .show(ui, |ui| bottom_panel(ui, home, updates));
+                .show(ui, |ui| bottom_panel(ui, home, updates, short));
             Panel::left("servers")
                 .resizable(false)
+                // The rail's own colour sets it apart from the channels.
+                .show_separator_line(false)
                 .exact_size(RAIL_WIDTH)
                 .frame(panel_frame(colors.rail))
                 .show(ui, |ui| server_rail(ui, home));
@@ -2767,6 +2773,14 @@ fn rail_icon(ui: &mut Ui, icon: &Picture, selected: bool) -> Response {
 }
 
 fn server_rail(ui: &mut Ui, home: &mut Home) {
+    // Scrolls when the window is too low for every server, as on a phone held sideways.
+    ScrollArea::vertical()
+        .id_salt("server rail")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| server_rail_buttons(ui, home));
+}
+
+fn server_rail_buttons(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
         let dms = matches!(home.view, View::Direct(_));
@@ -2867,13 +2881,13 @@ fn paint_marks(ui: &Ui, row: Rect, (unread, mentions): (bool, u32)) {
     }
 }
 
-fn bottom_panel(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) {
+fn bottom_panel(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater, short: bool) {
     if updates.available() {
         Frame::new()
             .inner_margin(Margin::symmetric(0, ui::SPACE_XS as i8))
             .show(ui, |ui| updates.button(ui));
     }
-    call::call_bar(ui, home);
+    call::call_bar(ui, home, short);
     user_bar::show(ui, home, updates.available());
 }
 
