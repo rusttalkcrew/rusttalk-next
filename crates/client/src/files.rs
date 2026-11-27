@@ -2348,6 +2348,18 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.add_space(8.0);
                 let room = ui.available_size();
                 let stage = ui.available_rect_before_wrap();
+                // The scroll wheel (or a pinch) over the picture zooms; sideways still pans.
+                if ui.rect_contains_pointer(stage) {
+                    let factor = ctx.input_mut(|input| {
+                        let wheel = std::mem::take(&mut input.smooth_scroll_delta.y);
+                        input.zoom_delta() * (wheel / 200.0).exp()
+                    });
+                    if factor != 1.0
+                        && let Some(view) = files.viewer.as_mut()
+                    {
+                        view.zoom = (view.zoom * factor).clamp(0.25, 8.0);
+                    }
+                }
                 let view = files.viewer.as_ref().expect("checked above");
                 let mut picture = None;
                 match files.full.as_ref().map(|full| &full.picture) {
@@ -2685,13 +2697,25 @@ mod tests {
             unit: egui::MouseWheelUnit::Point,
             phase: egui::TouchPhase::Move,
             source: egui::MouseWheelSource::Unknown,
-            delta: Vec2::new(-200.0, -200.0),
+            delta: Vec2::new(-200.0, 0.0),
             modifiers: egui::Modifiers::NONE,
         });
         harness.run_steps(10);
         assert!(
             painted_image(&harness).left() < after_drag.left(),
-            "wheel must scroll the image"
+            "sideways wheel must scroll the image"
+        );
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            delta: Vec2::new(0.0, 200.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(10);
+        assert!(
+            harness.state().viewer.as_ref().unwrap().zoom > 4.0,
+            "wheel up must zoom in"
         );
         click(&mut harness, egui::pos2(400.0, 320.0), false);
         assert!(harness.state().viewer.is_some(), "panned image");
