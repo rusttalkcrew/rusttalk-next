@@ -13,7 +13,7 @@ use crate::{
     call, camera,
     files::Ask,
     home::{Home, Tab, face, privacy_tab},
-    i18n::{LANGS, Lang},
+    i18n::{CLOCKS, Clock, LANGS, Lang},
     net::Command,
     server::Directory,
     ui::{
@@ -1078,13 +1078,14 @@ fn other_device_row(ui: &mut Ui, device: &crate::server::Device) -> bool {
 }
 
 /// Settings → Appearance: dark, light or the system's mode, a theme for each, and
-/// the accent colour, and the language. Changes show at once.
+/// the accent colour, the language and clock format. Changes show at once.
 fn appearance_page(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     let before = settings.appearance();
     let mut look = before;
     let language = settings.language.clone();
+    let clock = settings.clock.clone();
     let emoji_on_hover = settings.emoji_on_hover;
     ui::page_section(ui, t!("settings.language"));
     ui::setting_row(
@@ -1108,6 +1109,26 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             });
         },
     );
+    ui::setting_row(ui, t!("settings.clock"), t!("settings.clock_help"), |ui| {
+        let label = |clock: Clock| {
+            let example = crate::i18n::clock_example(clock);
+            match clock {
+                Clock::Auto => t!("settings.clock_auto", example = example),
+                Clock::H12 => t!("settings.clock_12h", example = example),
+                Clock::H24 => t!("settings.clock_24h", example = example),
+            }
+        };
+        let combo = ComboBox::from_id_salt("clock")
+            .selected_text(label(Clock::from_id(&settings.clock)))
+            .show_ui(ui, |ui| {
+                for clock in CLOCKS {
+                    ui.selectable_value(&mut settings.clock, clock.id().into(), label(clock));
+                }
+            });
+        combo
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, t!("settings.clock")));
+    });
     ui::page_section(ui, t!("settings.mode"));
     let modes = [
         (
@@ -1197,9 +1218,13 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             });
         },
     );
-    if look != before || settings.language != language || settings.emoji_on_hover != emoji_on_hover
+    if look != before
+        || settings.language != language
+        || settings.clock != clock
+        || settings.emoji_on_hover != emoji_on_hover
     {
         crate::i18n::set(&settings.language);
+        crate::i18n::set_clock(&settings.clock);
         settings.set_appearance(look);
         audio.set_settings(settings);
     }

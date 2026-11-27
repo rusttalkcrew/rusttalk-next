@@ -1,7 +1,8 @@
 
 # English, the source and fallback for every other language.
 # `key = text`; `{name}` is filled in by the app; `key.one`/`key.other` are plural forms.
-# time.* keys are chrono format patterns.
+# time.* keys are chrono format patterns, each in a _12h and a _24h version; time.hours
+# is the language's usual clock, and %p becomes time.am or time.pm.
 
 # crates/client/src/settings.rs
 common.search = Search
@@ -87,6 +88,11 @@ settings.accent_help = Used for buttons, links and what's selected.
 settings.language = Language
 settings.app_language = App language
 settings.language_help = Names and messages stay as people wrote them.
+settings.clock = Time format
+settings.clock_help = Automatic follows the app language.
+settings.clock_auto = Automatic ({example})
+settings.clock_12h = 12-hour ({example})
+settings.clock_24h = 24-hour ({example})
 settings.motion = Motion
 settings.animated_emoji = Animated emoji
 settings.animated_emoji_help = Server emoji and stickers that move. On hover is calmer and saves power.
@@ -381,9 +387,15 @@ notice.joined = {name} joined
 notice.left = {name} left
 notice.added_device = {name} added a new device
 notice.removed_device = {name} removed a device
-time.clock = %-I:%M %p
-time.day_clock = %b %-d, %-I:%M %p
-time.date_clock = %b %-d, %Y, %-I:%M %p
+time.hours = 12
+time.am = AM
+time.pm = PM
+time.clock_12h = %-I:%M %p
+time.clock_24h = %H:%M
+time.day_clock_12h = %b %-d, %-I:%M %p
+time.day_clock_24h = %b %-d, %H:%M
+time.date_clock_12h = %b %-d, %Y, %-I:%M %p
+time.date_clock_24h = %b %-d, %Y, %H:%M
 
 # crates/client/src/admin.rs
 audit.filter_bans = Bans

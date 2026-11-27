@@ -8,7 +8,10 @@ use eframe::egui::{
     self, Align, Color32, FontId, Frame, Layout, Margin, Rect, RichText, Ui, UiBuilder, Vec2,
 };
 
-use super::{Home, events::parse_time};
+use super::{
+    Home,
+    events::{evening, parse_time},
+};
 use crate::{
     call,
     net::Command,
@@ -273,9 +276,9 @@ pub fn dialog(ctx: &egui::Context, home: &mut Home) {
                         ui.label(ui::bold(t!("focus.end_time")));
                         let field = ui.add(
                             ui::field(time)
-                                .char_limit(5)
-                                .hint_text("20:00")
-                                .desired_width(80.0),
+                                .char_limit(10)
+                                .hint_text(crate::i18n::clock_time(evening()))
+                                .desired_width(96.0),
                         );
                         submitted = field.lost_focus()
                             && ui.input(|input| input.key_pressed(egui::Key::Enter));
