@@ -227,7 +227,7 @@ fn member_rank(dir: &Directory, member: &Member) -> i64 {
 type Permission = (&'static str, &'static str, &'static str, bool);
 
 /// The permissions in groups, with the group titles.
-fn groups(events: bool, focus: bool) -> Vec<(&'static str, Vec<Permission>)> {
+fn groups(events: bool, focus: bool, raid: bool) -> Vec<(&'static str, Vec<Permission>)> {
     let mut groups = vec![
         (
             t!("admin.group_general"),
@@ -315,6 +315,22 @@ fn groups(events: bool, focus: bool) -> Vec<(&'static str, Vec<Permission>)> {
             t!("perm.start_focus_help"),
             false,
         ));
+    }
+    if raid {
+        groups[2].1.extend([
+            (
+                "lock_down",
+                t!("perm.lock_down"),
+                t!("perm.lock_down_help"),
+                false,
+            ),
+            (
+                "remove_recent_messages",
+                t!("perm.remove_recent_messages"),
+                t!("perm.remove_recent_messages_help"),
+                true,
+            ),
+        ]);
     }
     if events {
         groups.push((
@@ -803,7 +819,9 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
         .get_or_insert_with(|| role.permissions.clone());
     // Servers that know focus mode gave it to the owner role, which keeps every permission.
     let focus = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "start_focus"));
-    let groups = groups(dir.calendar.is_some(), focus);
+    // Servers with raid tools gave them to the owner role too.
+    let raid = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "lock_down"));
+    let groups = groups(dir.calendar.is_some(), focus, raid);
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);

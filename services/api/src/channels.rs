@@ -919,6 +919,7 @@ mod tests {
             voice: None,
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
+            joins: Default::default(),
         };
         // Person 1 owns the server; person 2 is a member without any role.
         let person = |byte: u8| vec![byte; 32];
@@ -1087,6 +1088,7 @@ mod tests {
             voice: None,
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
+            joins: Default::default(),
         };
         // Person 1 owns the server; person 2 is a member without any role.
         let person = |byte: u8| vec![byte; 32];
@@ -1209,6 +1211,7 @@ mod tests {
             voice: None,
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
+            joins: Default::default(),
         };
         // Person 1 is a Member; person 2 has no role and so no `start_focus`.
         let person = |byte: u8| vec![byte; 32];
@@ -1395,6 +1398,7 @@ mod tests {
             voice: None,
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
+            joins: Default::default(),
         };
         // Person 1 owns the server; person 2 holds a custom role with Manage channels,
         // ranked above Member and below Admin.

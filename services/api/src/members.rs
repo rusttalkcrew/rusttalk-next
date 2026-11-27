@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{OpenJoining, PROTOCOL_VERSION, ServerInfo, decode, encode},
-    keys::{INVITE_BYTES, Metadata},
+    keys::{Event, INVITE_BYTES, Metadata},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -18,7 +18,7 @@ use crate::{
     },
     keys, metadata, payload,
     roles::{self, Permission},
-    store::{audit, hash, log_closed, now, write},
+    store::{audit, audit_details, hash, log_closed, now, write},
     voice,
 };
 
@@ -419,7 +419,17 @@ pub async fn leave(State(app): State<App>, headers: HeaderMap) -> ApiResult<Stat
 pub struct BanRequest {
     #[serde(default)]
     ban_ip: bool,
+    /// Also remove what they posted in this many seconds before the ban (one hour, day or
+    /// week), with the files they uploaded then. Needs `remove_recent_messages`.
+    #[serde(default)]
+    remove_secs: Option<i64>,
 }
+
+/// The windows `remove_secs` may take: one hour, one day and seven days.
+const REMOVE_WINDOWS: [i64; 3] = [3_600, 86_400, 604_800];
+
+/// Over this many removed messages, readers resync instead of hearing about each one.
+const REMOVED_NOTICES: usize = 200;
 
 pub async fn ban(
     State(app): State<App>,
@@ -431,6 +441,13 @@ pub async fn ban(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let auth = roles::authority(&mut tx, &actor.person).await?;
     auth.require(Permission::Ban)?;
+    let request = payload(body)?;
+    if let Some(secs) = request.remove_secs {
+        auth.require(Permission::RemoveRecentMessages)?;
+        if !REMOVE_WINDOWS.contains(&secs) {
+            return Err(ApiError::bad_request("invalid_remove_window"));
+        }
+    }
     auth.outrank(&roles::authority(&mut tx, &person).await?)?;
     let added = query(
         "INSERT INTO bans (person_id, banned_at, banned_by, banned_by_rank) VALUES (?, ?, ?, ?)
@@ -445,7 +462,7 @@ pub async fn ban(
     if added.rows_affected() == 0 {
         return Err(ApiError::new(StatusCode::CONFLICT, "already_banned"));
     }
-    if payload(body)?.ban_ip {
+    if request.ban_ip {
         let addresses: Vec<String> =
             query_scalar("SELECT DISTINCT ip FROM sessions WHERE person_id = ? AND expires_at > ?")
                 .bind(person.as_slice())
@@ -492,11 +509,103 @@ pub async fn ban(
         actor.at,
     )
     .await?;
+    let removed = match request.remove_secs {
+        Some(secs) => remove_recent(&app, &mut tx, &actor, &person, secs).await?,
+        None => Vec::new(),
+    };
     tx.commit().await?;
     log_closed(closed, actor.at, "banned");
     keys::changed(&app, &person, None);
     voice::enforce(&app, None);
+    if removed.len() > REMOVED_NOTICES {
+        app.notify(Event::Resync);
+    } else {
+        for (channel, id) in removed {
+            app.notify(Event::MessageDeleted { channel, id });
+        }
+    }
+    if request.remove_secs.is_some() {
+        // Their files were marked expired; unlink them now rather than at the next sweep.
+        let app = app.clone();
+        tokio::spawn(async move {
+            if let Err(error) = crate::files::expire_batch(&app).await {
+                tracing::error!(reason = error.code, "file expiry failed");
+            }
+        });
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove what `person` posted in channels during the last `secs`, and the files they
+/// uploaded there then, without reading any of it: by sender and time only. DMs went with
+/// the membership. Returns each removed message's channel and ID.
+async fn remove_recent(
+    app: &App,
+    db: &mut SqliteConnection,
+    actor: &crate::auth::Actor,
+    person: &[u8],
+    secs: i64,
+) -> ApiResult<Vec<(String, String)>> {
+    let since = actor.at - secs;
+    let channels: Vec<(String, bool)> =
+        query_as("SELECT id, page FROM channels WHERE kind <> 'dm'")
+            .fetch_all(&mut *db)
+            .await?;
+    let mut removed = Vec::new();
+    for (channel, page) in channels {
+        // By device too, so the (channel, device, person) index finds their messages.
+        let ids: Vec<String> = query_scalar(
+            "DELETE FROM messages WHERE channel_id = ?1 AND sender_person = ?2 AND at >= ?3
+                 AND sender_device IN (SELECT device_id FROM message_senders WHERE person_id = ?2)
+             RETURNING id",
+        )
+        .bind(&channel)
+        .bind(person)
+        .bind(since)
+        .fetch_all(&mut *db)
+        .await?;
+        if ids.is_empty() {
+            continue;
+        }
+        crate::messages::uncount(&mut *db, &channel, ids.len() as u64).await?;
+        if page {
+            crate::page_files::refresh(app, db, &channel).await?;
+        }
+        removed.extend(ids.into_iter().map(|id| (channel.clone(), id)));
+    }
+    // Their files from then, as a moderator's message delete removes them; the sweep unlinks
+    // expired files. One the newest version of a page still shows stays.
+    let files = query(&format!(
+        "UPDATE files SET expires_at = 0 WHERE uploader = ? AND created_at >= ? AND expires_at > 0
+             AND id NOT IN ({})",
+        crate::page_files::KEPT
+    ))
+    .bind(person)
+    .bind(since)
+    .execute(&mut *db)
+    .await?
+    .rows_affected();
+    audit_details(
+        db,
+        &actor.person,
+        "recent_messages_removed",
+        Some(person),
+        None,
+        Some(serde_json::json!({
+            "secs": secs,
+            "messages": removed.len(),
+            "files": files,
+        })),
+        actor.at,
+    )
+    .await?;
+    tracing::info!(
+        messages = removed.len(),
+        files,
+        secs,
+        "recent messages removed"
+    );
+    Ok(removed)
 }
 
 pub async fn unban(
@@ -763,7 +872,10 @@ mod tests {
             State(app.clone()),
             as_person(1),
             Path(encode(&person(3))),
-            Ok(Json(BanRequest { ban_ip: false })),
+            Ok(Json(BanRequest {
+                ban_ip: false,
+                remove_secs: None,
+            })),
         )
         .await?;
         leave(State(app.clone()), as_person(4)).await?;
@@ -864,6 +976,7 @@ mod tests {
             voice: None,
             session_ttl: crate::auth::SESSION_TTL,
             listing_changed: tokio::sync::watch::channel(()).0,
+            joins: Default::default(),
         };
         for open_joining in [false, true] {
             query("UPDATE server_settings SET open_joining = ?")
@@ -932,7 +1045,10 @@ mod tests {
             State(app.clone()),
             as_person(3),
             Path(encode(&person(6))),
-            Ok(Json(BanRequest { ban_ip: false })),
+            Ok(Json(BanRequest {
+                ban_ip: false,
+                remove_secs: None,
+            })),
         )
         .await;
         assert_eq!(placed.unwrap(), StatusCode::NO_CONTENT);
@@ -1099,6 +1215,113 @@ mod tests {
             .code,
             "permission_denied"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_ban_can_remove_the_last_hours_messages_and_files() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 4).await?;
+        // Person 4 may ban but not remove messages.
+        query(
+            "INSERT INTO roles (id, kind, rank, permissions) VALUES ('bouncer', 'custom', 10, 4)",
+        )
+        .execute(&app.db)
+        .await?;
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'bouncer')")
+            .bind(person(4))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES ('c', 0, x'00')")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channels (id, kind, category_id, position, name_ct, message_count) VALUES ('t', 'text', 'c', 0, x'00', 3)")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO key_scopes (id, kind, channel_id) VALUES ('t', 'channel', 't')")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES ('t', 1, zeroblob(32))")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO message_senders VALUES (X'02', ?, X'00'), (X'03', ?, X'00')")
+            .bind(person(2))
+            .bind(person(3))
+            .execute(&app.db)
+            .await?;
+        let at = now()?;
+        for (id, sender, sent) in [
+            ("new", 2u8, at - 100),
+            ("old", 2, at - 7200),
+            ("other", 3, at - 100),
+        ] {
+            query("INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
+                   VALUES (?, 't', 1, ?, ?, ?, 111, zeroblob(111))")
+                .bind(id).bind(vec![sender]).bind(person(sender)).bind(sent)
+                .execute(&app.db).await?;
+            query("INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at) VALUES (?, 't', ?, 16, ?, ?)")
+                .bind(id).bind(person(sender)).bind(sent).bind(i64::MAX)
+                .execute(&app.db).await?;
+        }
+        let ban_with = |who: u8, remove_secs| {
+            ban(
+                State(app.clone()),
+                as_person(who),
+                Path(encode(&person(2))),
+                Ok(Json(BanRequest {
+                    ban_ip: false,
+                    remove_secs,
+                })),
+            )
+        };
+        assert_eq!(
+            ban_with(4, Some(3600)).await.unwrap_err().code,
+            "permission_denied"
+        );
+        assert_eq!(
+            ban_with(1, Some(60)).await.unwrap_err().code,
+            "invalid_remove_window"
+        );
+        let mut events = app.changes.subscribe();
+        ban_with(1, Some(3600)).await?;
+
+        let left: Vec<String> = query_scalar("SELECT id FROM messages ORDER BY id")
+            .fetch_all(&app.db)
+            .await?;
+        assert_eq!(left, ["old", "other"]);
+        let count: i64 = query_scalar("SELECT message_count FROM channels WHERE id = 't'")
+            .fetch_one(&app.db)
+            .await?;
+        assert_eq!(count, 2);
+        let expired: Vec<String> =
+            query_scalar("SELECT id FROM files WHERE expires_at = 0 ORDER BY id")
+                .fetch_all(&app.db)
+                .await?;
+        assert!(expired.is_empty() || expired == ["new"]);
+        let kept: Vec<String> =
+            query_scalar("SELECT id FROM files WHERE expires_at > 0 ORDER BY id")
+                .fetch_all(&app.db)
+                .await?;
+        assert_eq!(kept, ["old", "other"]);
+        let details: String =
+            query_scalar("SELECT details FROM audit_log WHERE action = 'recent_messages_removed'")
+                .fetch_one(&app.db)
+                .await?;
+        let details: serde_json::Value = serde_json::from_str(&details)?;
+        assert_eq!(
+            details,
+            serde_json::json!({"secs": 3600, "messages": 1, "files": 1})
+        );
+        let mut deleted = Vec::new();
+        while let Ok(change) = events.try_recv() {
+            if let crate::Change::Update(notice) = change
+                && let rusttalk_core::presence::Update::Event(Event::MessageDeleted { id, .. }) =
+                    &notice.update
+            {
+                deleted.push(id.clone());
+            }
+        }
+        assert_eq!(deleted, ["new"]);
         Ok(())
     }
 }

@@ -43,9 +43,13 @@ pub enum Permission {
     ManageEvents = 16384,
     /// Put a channel into focus mode for a while.
     StartFocus = 32768,
+    /// Turn lockdown on or off and set automatic lockdown: nobody new joins while it's on.
+    LockDown = 131072,
+    /// When banning someone, also remove what they posted in the last hour, day or week.
+    RemoveRecentMessages = 262144,
 }
 
-const PERMISSIONS: [Permission; 16] = [
+const PERMISSIONS: [Permission; 18] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -62,6 +66,8 @@ const PERMISSIONS: [Permission; 16] = [
     Permission::CreateEvents,
     Permission::ManageEvents,
     Permission::StartFocus,
+    Permission::LockDown,
+    Permission::RemoveRecentMessages,
 ];
 
 #[derive(FromRow)]

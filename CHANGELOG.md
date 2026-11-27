@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Raid tools: lock your server down so nobody new can join, automatically when many people join at once, and remove a banned person's messages from the last hour, day or week.
 - Settings → Appearance has a Time format choice: Automatic (follows the app language), 12-hour (2:58 PM) or 24-hour (14:58). It applies to every time in the app and follows you to your other devices. Event and focus mode time fields also accept times like 8 PM.
 
 ## v0.9.1 - 2026-11-26

@@ -80,6 +80,8 @@ pub fn preview(real: &Directory, roles: &[String]) -> Directory {
         create_events: mine.create_events && grants("create_events"),
         manage_events: mine.manage_events && grants("manage_events"),
         start_focus: mine.start_focus && grants("start_focus"),
+        lock_down: mine.lock_down && grants("lock_down"),
+        remove_recent_messages: mine.remove_recent_messages && grants("remove_recent_messages"),
         rank: (roles.iter().map(|role| role.rank).max())
             .unwrap_or(-1)
             .min(mine.rank),

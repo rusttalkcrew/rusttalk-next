@@ -130,7 +130,7 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
 | DELETE `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, lifts the mute |
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip, can_lift}`, newest first |
-| PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
+| PUT `/v1/bans/{person}` | `{ban_ip?, remove_secs?}`, default false and none | `ban`. 204. `remove_secs` (3600, 86400 or 604800, otherwise `400 invalid_remove_window`) also needs `remove_recent_messages`: the server deletes the person's messages sent in that many seconds before the ban from every non-DM channel, by sender and time without reading them, and expires the files they uploaded then (except files the newest version of a page keeps), which cleanup unlinks right away. Audited as `recent_messages_removed` with `{secs, messages, files}`. Readers get a `message_deleted` per message, or one `resync` when more than 200 went |
 | DELETE `/v1/bans/{person}` | Empty | `ban` and may lift it (see below). 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
 | POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
@@ -142,6 +142,8 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | PUT `/v1/owner` | `{person_id}` | Owner. 204, transfers ownership to a member |
 | GET `/v1/settings/open-joining` | Empty | Owner or Admin. 200, `{open_joining, member_cap}` |
 | PUT `/v1/settings/open-joining` | `{open_joining, member_cap}` | Owner or Admin. 204 |
+| GET `/v1/settings/lockdown` | Empty | `lock_down`. 200, `{locked, automatic, message?, auto_joins, auto_secs}`. Older servers answer 404 |
+| PUT `/v1/settings/lockdown` | `{locked, message?, auto_joins, auto_secs}` | `lock_down`. 204. While `locked`, signing in as someone new (by invite or open joining) is `403 server_locked`, with the optional `message` (up to 500 characters) as `message` in the error body. `auto_joins` (0 = off, or 2 to 1000; default 10) joins within `auto_secs` (60 to 3600; default 120) lock the server by themselves: `automatic` is then true, the change is audited as `lockdown_auto_started` (actor: the person whose join tipped it, details `{joins, secs}`) and the join that tipped it still goes through. The server counts joins in memory. Changes are audited as `lockdown_started`, `lockdown_ended`, `lockdown_message_changed` (without the text) and `auto_lockdown_changed` (`{before, after}`, each `{joins, secs}`). Every change sends `channel_changed` with part `lockdown`. Otherwise `400 invalid_lockdown_message` or `400 invalid_auto_lockdown` |
 | GET `/v1/settings/files` | Empty | Any member. 200, `{limits, ceilings, used_bytes}` |
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
 | GET `/v1/settings/message-history` | Empty | Any member. 200, `{keep, ceiling?}` |
@@ -169,9 +171,11 @@ with a `message_deleted` event per message. Older servers answer 404.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all sixteen flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all eighteen flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
-`create_events`, `manage_events` and `start_focus`. Member (0) has `suggest_events`
+`create_events`, `manage_events`, `start_focus`, `lock_down` and `remove_recent_messages`.
+Upgrading also gives `lock_down` to custom roles with `ban`, and `remove_recent_messages`
+to custom roles with `ban` and `delete_messages`. Member (0) has `suggest_events`
 and `start_focus` and starts as the default. Every new role gets `start_focus`
 when its creator has it. The other flags are `invite`, `manage_roles`,
 `view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
@@ -272,9 +276,9 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_body`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint`, `invalid_remove_window`, `invalid_lockdown_message`, `invalid_auto_lockdown` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `server_locked`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout`, `body_timeout` (a change body must arrive within 30 s; file uploads have their own limits) |
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
@@ -1403,7 +1407,7 @@ pushing updates.
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`, optional `profile`. Refresh the member and device directory and catalog. With `profile` (`display_name_ct`, `avatar_hash`, `bio_ct`, `hide_offline`, `avatar_initialized`, `voice_muted`, as `GET /v1/members` lists them) only that member's profile changed: update that member, no key or directory reload needed. Left out when the notice would exceed 3,800 bytes |
 | `presence_changed` | `person_id`, `status`, optional `chosen`. Sent to members when visible presence changes. With `chosen` (the member's new status choice), sent only to that member's own sockets when the choice changes, with `status` as others were last told |
-| `channel_changed` | Optional `part`. Refresh the catalog, server metadata, server emoji and server events. With `part`, only that changed, and no keys or access: `channels` (the catalog: channel and category names, topics, order, settings, focus mode), `space` (`GET /v1/space`), `emoji` or `calendar`. Treat an unknown `part` like none |
+| `channel_changed` | Optional `part`. Refresh the catalog, server metadata, server emoji and server events. With `part`, only that changed, and no keys or access: `channels` (the catalog: channel and category names, topics, order, settings, focus mode), `space` (`GET /v1/space`), `emoji`, `calendar` or `lockdown` (`GET /v1/settings/lockdown`, for people with `lock_down`; others ignore it). Treat an unknown `part` like none |
 | `voice_changed` | `channel`, optional `people` and `unknown` as from GET `/v1/voice/{channel}/participants`. Without them (older servers, or a roster too big for one frame), fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
