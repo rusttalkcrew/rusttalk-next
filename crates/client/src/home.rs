@@ -3846,12 +3846,22 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     let field = ui
                         .add(
                             ui::field(name)
+                                .char_limit(crate::profile::NAME_CHARS)
                                 .hint_text(t!("home.name_hint"))
                                 .desired_width(300.0),
                         )
                         .labelled_by(label.id);
                     Some(field)
                 };
+                // An invite pasted here by mistake must not become a name everyone sees.
+                let problem = if member {
+                    None
+                } else if name.trim_start().to_lowercase().starts_with("rusttalk://") {
+                    Some(t!("names.invite_in_name").into())
+                } else {
+                    crate::profile::name_problem(name)
+                };
+                error_text(ui, problem.as_deref());
                 ui.add_space(8.0);
                 if preview.invite.is_none() && !preview.open && !member {
                     ui.label(t!("home.needs_invite"));
@@ -3889,7 +3899,9 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     t!("common.join")
                 };
                 let submit = field.is_some_and(|field| submitted(ui, &field));
-                if ui::primary_large(ui, button).clicked() || submit {
+                let ok = problem.is_none();
+                let clicked = ui.add_enabled_ui(ok, |ui| ui::primary_large(ui, button));
+                if ok && (clicked.inner.clicked() || submit) {
                     let name = name.trim();
                     let admission = match (member, preview.invite) {
                         (true, _) => Admission::Member,
@@ -7183,6 +7195,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
             let (_, submitted) = name_field(ui, name);
+            let problem = crate::profile::name_problem(name);
+            error_text(ui, problem.as_deref());
             if !default_name.is_empty() {
                 ui.add_space(ui::SPACE_S);
                 let label = t!("home.use_default_name", name = default_name);
@@ -7190,7 +7204,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     name_choice = Some((*index, None));
                 }
             }
-            if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
+            if text_footer(ui, t!("common.save"), submitted, &mut close)
+                && !name.trim().is_empty()
+                && problem.is_none()
             {
                 name_choice = Some((*index, Some(name.trim().to_owned())));
             }
@@ -7943,6 +7959,7 @@ mod tests {
     mod gallery;
     mod image_reload;
     mod joining;
+    mod link_names;
     mod long_chat;
     mod member_list;
     mod menus;

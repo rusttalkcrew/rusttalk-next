@@ -676,6 +676,12 @@ fn build(
         if person == my_id && name.is_none() && row["display_name_ct"].is_string() {
             my_name_hidden = true;
         }
+        // My own name stays as typed, so I can see it and fix it in settings.
+        let name = if person == my_id {
+            name
+        } else {
+            crate::profile::received_name(name)
+        };
         let devices = client
             .devices()
             .filter(|device| device.person_id() == &person)

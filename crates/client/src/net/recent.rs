@@ -382,7 +382,8 @@ impl Listing {
                 .into_iter()
                 .map(|(person, name, hide_offline)| Member {
                     person,
-                    name,
+                    // Saved by an app from before names with links were hidden.
+                    name: crate::profile::received_name(name),
                     hide_offline,
                     avatar: by_owner.remove(&person),
                     presence: Presence::Offline,

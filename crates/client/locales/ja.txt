@@ -606,6 +606,10 @@ perm.move_members = ボイスで移動
 server.unknown_device = 不明なデバイス
 server.member_unnamed = メンバー {id}
 
+# crates/client/src/profile.rs
+names.no_links = 名前にリンクは使えません。
+names.invite_in_name = これは招待リンクです。招待リンクの欄に貼り付けてください。
+
 # crates/client/src/net/admin.rs
 admin.failed = うまくいきませんでした。もう一度お試しください。
 admin.done_kicked = サーバーから外しました。
