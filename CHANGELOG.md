@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.
 - Camera pictures look smooth instead of grainy in small tiles: they are scaled down by averaging, like the system's own camera preview.
 - Show the whole call full screen at any time with the new button at the top right of the call.
 
