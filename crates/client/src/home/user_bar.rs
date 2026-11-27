@@ -150,9 +150,12 @@ fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
 }
 
 /// Mic and sound on or off; only shown in a call.
-fn sound_buttons(ui: &mut Ui, home: &Home) {
-    deafen_button(ui, home, BUTTON_SIZE);
-    mic_button(ui, home, BUTTON_SIZE);
+/// A right-click on either picks its device.
+fn sound_buttons(ui: &mut Ui, home: &mut Home) {
+    let sound = deafen_button(ui, home, BUTTON_SIZE);
+    crate::call::device_choices(&sound, home, false);
+    let mic = mic_button(ui, home, BUTTON_SIZE);
+    crate::call::device_choices(&mic, home, true);
 }
 
 fn struck(off: bool) -> Look {
@@ -160,15 +163,17 @@ fn struck(off: bool) -> Look {
 }
 
 /// Sound on or off, also in the call view's controls on phones.
-pub fn deafen_button(ui: &mut Ui, home: &Home, size: Vec2) {
+pub fn deafen_button(ui: &mut Ui, home: &Home, size: Vec2) -> eframe::egui::Response {
     let deafened = home.voice.audio.deafened();
-    if ui::icon_button(ui, "🎧", deafen_tip(deafened), struck(deafened), size).clicked() {
+    let button = ui::icon_button(ui, "🎧", deafen_tip(deafened), struck(deafened), size);
+    if button.clicked() {
         toggle_deafen(home);
     }
+    button
 }
 
 /// Mic on or off, also in the call view's controls on phones.
-pub fn mic_button(ui: &mut Ui, home: &Home, size: Vec2) {
+pub fn mic_button(ui: &mut Ui, home: &Home, size: Vec2) -> eframe::egui::Response {
     let audio = &home.voice.audio;
     let muted = audio.muted() || audio.deafened();
     let server_muted = server_muted(home);
@@ -182,6 +187,7 @@ pub fn mic_button(ui: &mut Ui, home: &Home, size: Vec2) {
     if mic.clicked() {
         toggle_mute(home);
     }
+    mic
 }
 
 /// A moderator's mute holds until they lift it; the person can't unmute themselves.

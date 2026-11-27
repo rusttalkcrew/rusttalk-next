@@ -58,7 +58,7 @@ pub(crate) mod pip;
 pub mod remote;
 mod stage;
 pub mod terminal;
-pub use panel::{Link, call_bar, phone_controls};
+pub use panel::{Link, call_bar, device_choices, phone_controls};
 pub use stage::{Stage, full_view, keep_clear, phone_self_view, stage, whole_controls};
 
 pub struct Voice {

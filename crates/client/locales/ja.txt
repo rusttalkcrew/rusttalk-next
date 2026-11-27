@@ -897,6 +897,7 @@ call.people_in_call = 通話中の人
 call.e2ee = エンドツーエンド暗号化
 call.e2ee_help = 通話を聞いたり見たりできるのは参加者だけで、サーバーにはわかりません。
 call.voice_settings = 音声設定
+call.video_settings = ビデオ設定
 call.traffic = 通信量
 call.upload = アップロード
 call.download_traffic = ダウンロード

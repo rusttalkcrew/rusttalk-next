@@ -243,6 +243,7 @@ struct Picked {
     diagram: Option<super::diagram::Pick>,
     live: Option<LiveAction>,
     voice_settings: bool,
+    video_settings: bool,
 }
 
 /// Which optional buttons the share row has on this device.
@@ -415,6 +416,84 @@ pub fn phone_control_count(home: &mut Home) -> usize {
     3 + Extras::of(&mut home.voice, app_audio).count()
 }
 
+/// A right-click on the mic (`mic`) or sound button: pick the device, or open the
+/// voice settings.
+pub fn device_choices(button: &Response, home: &mut Home, mic: bool) {
+    let audio = home.voice.audio.clone();
+    let (inputs, outputs) = audio.devices();
+    let mut s = audio.settings();
+    let mut picked = Picked::default();
+    let (title, chosen, devices) = if mic {
+        (t!("call.microphone"), &s.input, &inputs)
+    } else {
+        (t!("call.speakers"), &s.output, &outputs)
+    };
+    let pick = ui::context_menu(button, |m| {
+        device_menu(m, title, chosen, devices, &mut picked)
+    });
+    if let Some(Some(pick)) = pick {
+        if mic {
+            s.input = pick;
+        } else {
+            s.output = pick;
+        }
+        audio.set_settings(s);
+    }
+    if picked.voice_settings {
+        home.settings = Some(Tab::Voice);
+    }
+}
+
+/// A device list for a right-click menu: the system default, then each device, with a
+/// tick on `chosen`. Returns the pick; voice settings sit at the bottom.
+fn device_menu(
+    m: &mut ui::Menu,
+    title: &str,
+    chosen: &Option<String>,
+    devices: &[crate::audio::DeviceInfo],
+    picked: &mut Picked,
+) -> Option<Option<String>> {
+    m.caption(title);
+    let mut pick = None;
+    let default = ui::Item::new("", t!("common.system_default")).picked(chosen.is_none());
+    if m.add(default).clicked() {
+        pick = Some(None);
+    }
+    for device in devices {
+        let on = chosen.as_ref() == Some(&device.id);
+        if m.add(ui::Item::new("", &device.name).picked(on)).clicked() {
+            pick = Some(Some(device.id.clone()));
+        }
+    }
+    m.separator();
+    if m.item("⚙", t!("call.voice_settings")).clicked() {
+        picked.voice_settings = true;
+    }
+    pick
+}
+
+/// The cameras for the camera button's right-click menu, with a tick on `chosen`.
+fn camera_choices(
+    m: &mut ui::Menu,
+    chosen: &Option<String>,
+    found: &[String],
+) -> Option<Option<String>> {
+    m.caption(t!("camera.camera"));
+    let mut pick = None;
+    let first = ui::Item::new("", t!("camera.first")).picked(chosen.is_none());
+    if m.add(first).clicked() {
+        pick = Some(None);
+    }
+    for name in found {
+        let label = crate::camera::camera_label(name);
+        let on = chosen.as_ref() == Some(name);
+        if m.add(ui::Item::new("", &label).picked(on)).clicked() {
+            pick = Some(Some(name.clone()));
+        }
+    }
+    pick
+}
+
 fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
     ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, size)
 }
@@ -422,7 +501,13 @@ fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
 /// Camera on or off. On phones, while it is on, a tap opens a menu to flip the
 /// camera, switch its light or turn it off. Returned so a caller can hang more
 /// choices off it.
-fn camera_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2) -> Response {
+fn camera_button(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    can: &Can,
+    size: Vec2,
+    picked: &mut Picked,
+) -> Response {
     let camera = &mut voice.camera;
     let controls = camera.controls();
     let look = if camera.on {
@@ -447,6 +532,7 @@ fn camera_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2) -> Respo
         if button.clicked() {
             camera.on ^= true;
         }
+        camera_choices_menu(&button, voice, picked);
         return button;
     };
     if let Some(pick) = ui::menu(&button, |m| camera_menu(m, controls)).flatten() {
@@ -455,6 +541,27 @@ fn camera_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2) -> Respo
         voice.audio.set_settings(settings);
     }
     button
+}
+
+/// A right-click on the camera button: pick the camera, or open the video settings.
+/// Cameras are looked for only once the menu opens.
+fn camera_choices_menu(button: &Response, voice: &mut Voice, picked: &mut Picked) {
+    let found = if ui::menu_open(button) {
+        voice.camera.found(&button.ctx)
+    } else {
+        Vec::new()
+    };
+    let mut s = voice.audio.settings();
+    let pick = ui::context_menu(button, |m| {
+        let pick = camera_choices(m, &s.camera, &found);
+        m.separator();
+        picked.video_settings |= m.item("⚙", t!("call.video_settings")).clicked();
+        pick
+    });
+    if let Some(Some(pick)) = pick {
+        s.camera = pick;
+        voice.audio.set_settings(s);
+    }
 }
 
 /// The camera button's menu while the camera is on.
@@ -493,37 +600,9 @@ fn share_buttons(
     size: Vec2,
     picked: &mut Picked,
 ) {
-    camera_button(ui, voice, can, size);
+    camera_button(ui, voice, can, size, picked);
     if extras.screen {
-        let look = if voice.sharing == Sharing::Off {
-            Look::Plain
-        } else {
-            Look::On(ui::colors(ui).success)
-        };
-        let button = ui
-            .add_enabled_ui(can.connected && can.share_video, |ui| {
-                ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
-            })
-            .inner;
-        if voice.sharing == Sharing::On {
-            ui::context_menu(&button, |m| {
-                if m.item("🖥", t!("call.change_my_share")).clicked() {
-                    picked.change_screen = true;
-                }
-                if m.danger("⏹", t!("call.stop_sharing")).clicked() {
-                    picked.stop_screen = true;
-                }
-            });
-        }
-        if !can.share_video {
-            button.on_disabled_hover_text(t!("call.no_screen_here"));
-        } else if button.clicked() {
-            if voice.sharing == Sharing::Off {
-                open_screen_dialog(ui.ctx(), voice);
-            } else {
-                picked.stop_screen = true;
-            }
-        }
+        screen_button(ui, voice, can, size, picked);
     }
     let talk = can.connected && can.blocked.is_none();
     if extras.app_audio {
@@ -532,6 +611,88 @@ fn share_buttons(
     let can_call = extras.phone && talk;
     let more = more_button(ui, voice, extras.terminal, can_call, can.connected, size);
     (picked.terminal, picked.diagram) = more;
+}
+
+/// Share the screen, or stop sharing; right-click while sharing to change or stop.
+fn screen_button(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    can: &Can,
+    size: Vec2,
+    picked: &mut Picked,
+) -> Response {
+    let look = if voice.sharing == Sharing::Off {
+        Look::Plain
+    } else {
+        Look::On(ui::colors(ui).success)
+    };
+    let button = ui
+        .add_enabled_ui(can.connected && can.share_video, |ui| {
+            ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
+        })
+        .inner;
+    if voice.sharing == Sharing::Off && can.connected && can.share_video {
+        let mut s = voice.audio.settings();
+        let before = (s.screen_height, s.screen_fps, s.screen_cursor);
+        let share = ui::context_menu(&button, |m| screen_quick_options(m, &mut s));
+        if (s.screen_height, s.screen_fps, s.screen_cursor) != before {
+            voice.audio.set_settings(s);
+        }
+        if share == Some(true) {
+            open_screen_dialog(ui.ctx(), voice);
+        }
+    }
+    if voice.sharing == Sharing::On {
+        ui::context_menu(&button, |m| {
+            if m.item("🖥", t!("call.change_my_share")).clicked() {
+                picked.change_screen = true;
+            }
+            if m.danger("⏹", t!("call.stop_sharing")).clicked() {
+                picked.stop_screen = true;
+            }
+        });
+    }
+    if !can.share_video {
+        return button.on_disabled_hover_text(t!("call.no_screen_here"));
+    }
+    if button.clicked() {
+        if voice.sharing == Sharing::Off {
+            open_screen_dialog(ui.ctx(), voice);
+        } else {
+            picked.stop_screen = true;
+        }
+    }
+    button
+}
+
+/// A right-click on screen share before sharing: start, or quickly set the quality,
+/// frame rate and cursor the next share starts with (the share dialog's choices).
+/// Returns whether to open the share dialog.
+fn screen_quick_options(m: &mut ui::Menu, s: &mut crate::audio::Settings) -> bool {
+    let share = m.item("🖥", t!("call.share_screen")).clicked();
+    let options = super::screen_options(s);
+    m.separator();
+    m.caption(t!("call.quality"));
+    for (height, label, _) in super::screen_qualities() {
+        let item = ui::Item::new("", label).picked(options.max_height == height);
+        if m.add(item).clicked() {
+            s.screen_height = height;
+        }
+    }
+    m.separator();
+    m.caption(t!("call.frame_rate"));
+    for (fps, label, _) in super::screen_rates() {
+        let item = ui::Item::new("", label).picked(options.fps == fps);
+        if m.add(item).clicked() {
+            s.screen_fps = fps;
+        }
+    }
+    m.separator();
+    let cursor = ui::Item::new("", t!("call.show_cursor")).checked(s.screen_cursor);
+    if m.add(cursor).clicked() {
+        s.screen_cursor ^= true;
+    }
+    share
 }
 
 /// Carry out what the call's buttons asked for.
@@ -593,6 +754,9 @@ fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
     }
     if picked.voice_settings {
         home.settings = Some(Tab::Voice);
+    }
+    if picked.video_settings {
+        home.settings = Some(Tab::Video);
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if picked.leave && super::phone::leave_or_ask(home, super::phone::Leave::Leave) {

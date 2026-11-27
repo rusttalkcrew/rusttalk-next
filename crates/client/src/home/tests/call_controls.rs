@@ -168,6 +168,21 @@ fn tablets_and_desktops_keep_controls_in_the_sidebar() {
             assert!(leave.right() <= sidebar, "{size:?}: {leave:?}");
             assert!(leave.height() < ui::TOUCH_TARGET);
             capture(&mut h, size, dark, "call");
+            // A right-click on mic, sound or camera lists the devices to pick from.
+            for (button, item) in [
+                (t!("call.mute"), t!("common.system_default")),
+                (t!("call.deafen"), t!("common.system_default")),
+                (t!("call.camera_on"), t!("camera.first")),
+                (t!("call.share_screen"), "1440p"),
+            ] {
+                h.get_by_label(button).click_secondary();
+                h.run_steps(2);
+                assert!(h.query_by_label(item).is_some(), "{button}");
+                capture(&mut h, size, dark, &format!("right-click-{button}"));
+                h.key_press(egui::Key::Escape);
+                h.run_steps(2);
+                assert!(h.query_by_label(item).is_none(), "{button}");
+            }
         }
     }
 }
