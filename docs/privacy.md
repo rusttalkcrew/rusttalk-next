@@ -405,6 +405,25 @@ Outbound connections), and the client checks its size and pinned SHA-256
 before saving it and again every time it loads it. A file that fails the check
 is deleted and never used; the normal noise suppression keeps working.
 
+### Sensitive media
+
+A sender can mark a message's pictures and videos as sensitive. The mark is a
+`;sensitive` parameter on the file's media type inside the encrypted message
+(see protocol.md, Sensitive media), so servers can't see it. Other apps blur
+those pictures until someone taps them.
+
+"Detect and blur automatically" (Settings → Privacy → Sensitive media, on by
+default) runs a small picture model that ships inside the app (MobileNetV2, MIT,
+see `crates/client/assets/sensitive/README.md`). It runs on a background thread
+on this device, only on thumbnails about to be shown, once per picture. Results
+are kept in memory only, are never written to disk and are never sent anywhere.
+The app downloads nothing for it and reports nothing; the model only blurs
+pictures on this screen.
+
+`sensitive.json` in the profile folder keeps the pictures this person blurred or
+showed from a picture's menu, by stored file ID. The "Sensitive media" choices
+are kept in `voice.json`. Both stay on this device and are never synced.
+
 ## Outbound connections
 
 - **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted

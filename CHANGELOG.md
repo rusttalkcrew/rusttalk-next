@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Sensitive pictures and videos show blurred until you tap them. Tick "Mark as sensitive" when sending, blur or unblur any picture from its menu, and choose in Settings → Privacy whether marked pictures blur and whether the app spots likely nude pictures on your device.
+
 ## v0.10.0 - 2026-11-27
 
 - Names can no longer contain links or invites. Someone whose name has a link shows as "Member" with a short code, so a pasted invite is never shown to everyone.

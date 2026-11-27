@@ -1,0 +1,2 @@
+# Model files are binary: no line ending changes or text diffs.
+*.onnx binary

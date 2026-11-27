@@ -238,6 +238,6 @@ mod attachment;
 #[cfg(any(feature = "client", test))]
 pub(crate) use attachment::CHUNK_BYTES;
 #[cfg(any(feature = "client", test))]
-pub use attachment::{Attachment, BlobRef};
+pub use attachment::{Attachment, BlobRef, SENSITIVE};
 #[cfg(feature = "client")]
 pub(crate) use attachment::{MAX_CIPHERTEXT, MAX_THUMBNAIL_BYTES, TAG_BYTES};

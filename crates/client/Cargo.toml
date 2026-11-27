@@ -19,6 +19,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = { version = "0.18", features = ["pulseaudio"] }
 # DeepFilterNet3 noise removal (tract, pure Rust); its weights are downloaded on request.
 deep-filter-rt = "0.2"
+# Runs the small picture model that blurs likely nude pictures (src/sensitive.rs).
+# deep-filter-rt already builds it, so it adds no new crates.
+tract-onnx = "0.23"
 rtrb = "0.3"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"] }
 # Desktops add the default features below. Their `wayland` feature makes arboard

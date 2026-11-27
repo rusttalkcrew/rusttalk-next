@@ -1571,6 +1571,16 @@ returns the same record fields as a message page, and
 `/v1/channels/{channel}/message-devices` also finds senders of shared files.
 Apps refresh the list when it is opened; no event announces changes.
 
+#### Sensitive media
+
+A sender marks a stored picture or video as sensitive by appending the media
+type parameter `;sensitive` to its media type, as in `image/jpeg;sensitive`.
+The media type is already inside the encrypted, signed message and limited to
+127 bytes, so the format, its size limit and the API are unchanged. A media type
+with no room left for the parameter is sent unmarked. Apps that know the mark
+blur the file until it is tapped. Older apps read the type before the `;`, or go
+by the file name, and show the file as before.
+
 #### Link previews
 
 A sender may attach a preview of one link in the message text as an ordinary

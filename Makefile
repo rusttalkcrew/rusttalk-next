@@ -103,6 +103,11 @@ test: ## Run unit and integration tests
 	cargo test $(CARGO_SCOPE) --locked
 	PATH="$(OPENSSL_PATH)$$PATH" python3 -m unittest discover -s deploy/updater
 
+.PHONY: sensitive-check
+sensitive-check: ## Print the sensitive picture check's scores for DIR=<folder>; local only, uploads nothing
+	@test -n "$(DIR)" || { echo "usage: make sensitive-check DIR=<folder>"; exit 2; }
+	cargo run --release --locked -p rusttalk-client --example sensitive_check -- "$(DIR)"
+
 .PHONY: android-camera-test
 android-camera-test: ## Run deterministic Android camera lifecycle tests (JDK, no device)
 	@set -eu; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \

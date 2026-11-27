@@ -2053,3 +2053,20 @@ audit.recent_messages_removed = {actor} が {target} の最近のメッセージ
 audit.removed_counts = メッセージ {messages} 件、ファイル {files} 件
 net.locked = このサーバーは現在ロックダウン中です。後でもう一度お試しください。
 net.locked_with_message = このサーバーは現在ロックダウン中です：{message}
+
+# crates/client/src/sensitive.rs and its places (#682), machine translated
+sensitive.label = センシティブ
+sensitive.tap_to_show = センシティブ、タップして表示
+sensitive.blur = ぼかす
+sensitive.unblur = ぼかさずに表示
+sensitive.mark = センシティブとしてマーク
+sensitive.mark_help = このメッセージの画像と動画は、誰かがタップするまでぼかして表示されます。
+sensitive.section = センシティブなメディア
+sensitive.blur_marked = マークされた画像と動画をぼかす
+sensitive.blur_marked_help = 送信者がセンシティブとマークしたものを、タップするまでぼかします。
+sensitive.detect = 自動で検出してぼかす
+sensitive.detect_help = アプリがこのデバイス上で画像を確認し、裸の可能性が高いものをぼかします。どこにも送信されません。
+sensitive.nsfw = NSFWチャンネルではぼかさない
+sensitive.nsfw_help = 参加に同意したNSFWチャンネルでは、センシティブなメディアをぼかさずに表示します。
+sensitive.show_all = すべてぼかさずに表示
+sensitive.show_all_help = 自分でぼかした画像以外は何もぼかしません。

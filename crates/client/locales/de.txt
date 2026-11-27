@@ -2053,3 +2053,20 @@ audit.recent_messages_removed = {actor} hat die neuen Nachrichten von {target} e
 audit.removed_counts = {messages} Nachrichten, {files} Dateien
 net.locked = Dieser Server ist gerade gesperrt. Versuch es später noch einmal.
 net.locked_with_message = Dieser Server ist gerade gesperrt: {message}
+
+# crates/client/src/sensitive.rs and its places (#682), machine translated
+sensitive.label = Sensibel
+sensitive.tap_to_show = Sensibel, zum Anzeigen tippen
+sensitive.blur = Unscharf machen
+sensitive.unblur = Ohne Unschärfe zeigen
+sensitive.mark = Als sensibel markieren
+sensitive.mark_help = Bilder und Videos in dieser Nachricht werden unscharf angezeigt, bis jemand darauf tippt.
+sensitive.section = Sensible Medien
+sensitive.blur_marked = Markierte Bilder und Videos unscharf machen
+sensitive.blur_marked_help = Was der Absender als sensibel markiert hat, bleibt unscharf, bis du darauf tippst.
+sensitive.detect = Automatisch erkennen und unscharf machen
+sensitive.detect_help = Deine App prüft Bilder auf diesem Gerät und macht wahrscheinlich nackte unscharf. Nichts wird irgendwohin gesendet.
+sensitive.nsfw = In NSFW-Kanälen scharf zeigen
+sensitive.nsfw_help = In NSFW-Kanälen, denen du zugestimmt hast, werden sensible Medien ohne Unschärfe gezeigt.
+sensitive.show_all = Alles ohne Unschärfe zeigen
+sensitive.show_all_help = Nichts wird unscharf, außer Bildern, die du selbst unscharf machst.
