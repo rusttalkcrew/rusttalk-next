@@ -1045,8 +1045,9 @@ impl Home {
             }
             return;
         }
-        // Friend messages only mean something in a DM.
-        if !dm && matches!(msg.body, Body::Friend(..)) {
+        // Friend messages only mean something in a DM. Blocked people's messages in
+        // shared channels don't mark, mention or notify either.
+        if !dm && (matches!(msg.body, Body::Friend(..)) || self.is_blocked(&msg.person)) {
             return;
         }
         if let Some(peer) = peer {
@@ -1729,18 +1730,26 @@ impl Home {
                     invite.link = Some((id, link));
                 }
             }
-            Update::Admin(address, update) => match &mut self.server_settings {
-                Some(settings) if self.servers[settings.server].address == address => {
-                    settings.apply(update);
-                }
-                _ => {
-                    if let AdminUpdate::Failed(text) | AdminUpdate::PartlySaved { text, .. } =
-                        update
-                    {
-                        self.toast = Some((text, now + 6.0));
+            Update::Admin(address, update) => {
+                let mut block = None;
+                match &mut self.server_settings {
+                    Some(settings) if self.servers[settings.server].address == address => {
+                        let done = matches!(update, AdminUpdate::Done(_));
+                        settings.apply(update);
+                        block = done.then(|| settings.banned_to_block()).flatten();
+                    }
+                    _ => {
+                        if let AdminUpdate::Failed(text) | AdminUpdate::PartlySaved { text, .. } =
+                            update
+                        {
+                            self.toast = Some((text, now + 6.0));
+                        }
                     }
                 }
-            },
+                if let Some(person) = block {
+                    self.block(person, now);
+                }
+            }
             Update::Call(address, channel, state) => {
                 let Some(call) = &mut self.voice.call else {
                     return;
@@ -4001,6 +4010,43 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
 }
 
+/// Settings → Privacy: everyone this person blocked, each with Unblock.
+fn blocked_people(ui: &mut Ui, home: &mut Home) {
+    ui::page_section(ui, t!("friends.blocked_section"));
+    ui.label(ui::caption(t!("friends.blocked_help")));
+    ui.add_space(ui::SPACE_XS);
+    let blocked: Vec<(Id, String)> = (home.friends.contacts())
+        .filter(|(_, contact)| contact.relation == Relation::Blocked)
+        .map(|(person, contact)| {
+            let name = match home.dm_server(person) {
+                None if !contact.name.is_empty() => contact.name.clone(),
+                _ => home.peer_name(person),
+            };
+            (*person, name)
+        })
+        .collect();
+    if blocked.is_empty() {
+        ui.label(ui::caption(t!("friends.empty_blocked")));
+        return;
+    }
+    let mut unblock = None;
+    for (person, name) in &blocked {
+        ui::trailing_row(
+            ui,
+            |ui| {
+                let button = ui::secondary(ui, t!("friends.unblock")).on_hover_text(name);
+                if button.clicked() {
+                    unblock = Some(*person);
+                }
+            },
+            |ui| ui.add(Label::new(ui::bold(name)).truncate()),
+        );
+    }
+    if let Some(person) = unblock {
+        home.unblock(person, ui.input(|input| input.time));
+    }
+}
+
 pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
@@ -4027,6 +4073,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
         audio.set_settings(settings.clone());
         home.publish_settings();
     }
+    blocked_people(ui, home);
     ui::page_section(ui, t!("home.member_lists"));
     let mut hide = settings.hide_offline.on;
     let toggle = ui.add_enabled_ui(!home.servers.is_empty(), |ui| {
@@ -5236,6 +5283,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     // whether each starts a group, then their heights as far as known.
     let mut shown: Vec<(usize, bool)> = Vec::new();
     let mut last: Option<&Msg> = None;
+    // A blocked person's message is one line of its own until shown.
+    let hidden = |revealed: &HashSet<(Id, Id)>, msg: &Msg| {
+        msg.person != me
+            && friends.is_blocked(&msg.person)
+            && !matches!(msg.body, Body::Notice { .. })
+            && !revealed.contains(&(msg.person, msg.id))
+    };
     for (at, msg) in chat.messages.iter().enumerate() {
         if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
             || matches!(
@@ -5251,6 +5305,8 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
                 && msg.at - prev.at < 300
                 && msg.reply_to.is_none()
+                && !hidden(&chat.revealed, prev)
+                && !hidden(&chat.revealed, msg)
         });
         shown.push((at, start));
         last = Some(msg);
@@ -5324,6 +5380,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let mut pick = None;
     let mut live = None;
     let mut resend = None;
+    let mut reveal = None;
     let mut tops = Vec::with_capacity(keys.len());
     let (mut changed, mut drawn, mut laid_at, mut end) = (false, 0, 0.0, 0.0);
     let output = area.show_viewport(ui, |ui, viewport| {
@@ -5359,6 +5416,14 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 continue;
             }
             let msg = &chat.messages[row];
+            if hidden(&chat.revealed, msg) {
+                if blocked_line(ui) {
+                    reveal = Some((msg.person, msg.id));
+                }
+                drawn += 1;
+                changed |= rows.measured(keys[i], heights[i], y(ui) - top);
+                continue;
+            }
             // The displayed copy carries this server's emoji and sticker IDs.
             let held_on = holder(msg);
             let (message_dir, message_channel) = match (at, held_on.map(|i| &servers[i])) {
@@ -5443,6 +5508,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         changed,
     });
     chat.rows = rows;
+    if let Some(message) = reveal {
+        chat.revealed.insert(message);
+        ui.ctx().request_repaint();
+    }
     // A row's height changed: lay it out again before showing it, so nothing jumps.
     if changed {
         ui.ctx().request_discard("chat row heights");
@@ -6461,6 +6530,18 @@ fn quiet(text: RichText) -> Label {
         .selectable(false)
         .truncate()
         .show_tooltip_when_elided(false)
+}
+
+/// The line in place of a blocked person's message; true when "Show" is clicked.
+fn blocked_line(ui: &mut Ui) -> bool {
+    ui.add_space(ui::SPACE_XS);
+    let shown = ui.horizontal(|ui| {
+        ui.weak("🚫");
+        ui.label(RichText::new(t!("home.blocked_message")).weak().italics());
+        ui.link(t!("home.show_blocked_message")).clicked()
+    });
+    ui.add_space(ui::SPACE_XS);
+    shown.inner
 }
 
 fn message_time(ui: &mut Ui, msg: &Msg) {
@@ -7963,6 +8044,7 @@ mod tests {
     mod album;
     mod audit_log;
     mod avatars;
+    mod blocking;
     mod call_controls;
     mod camera_pip;
     mod clock_format;
