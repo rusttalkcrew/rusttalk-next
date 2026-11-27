@@ -221,6 +221,11 @@ impl Server {
             .find(|channel| channel.id == *id)
     }
 
+    /// Whether this channel is marked NSFW (see `home::nsfw`).
+    pub fn is_nsfw(&self, id: &Id) -> bool {
+        self.channel(id).is_some_and(|channel| channel.nsfw)
+    }
+
     pub fn is_voice(&self, id: &Id) -> bool {
         self.channel(id).is_some_and(|channel| channel.voice)
     }
@@ -558,6 +563,9 @@ pub struct Channel {
     /// Seconds between one member's messages, 0 when slow mode is off.
     #[serde(default)]
     pub slow_mode_secs: u32,
+    /// May hold mature content: the app warns once per device before showing it.
+    #[serde(default)]
+    pub nsfw: bool,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }

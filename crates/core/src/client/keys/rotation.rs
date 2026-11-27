@@ -407,6 +407,7 @@ mod tests {
             member_limit: None,
             focus_until: None,
             slow_mode_secs: None,
+            nsfw: false,
             flags: vec![crate::client::RoleFlags {
                 role_id: "friends".into(),
                 flags: 1,

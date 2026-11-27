@@ -165,6 +165,9 @@ pub struct Channel {
     /// While slow mode is on: the seconds between one member's messages.
     #[serde(default)]
     pub slow_mode_secs: Option<u32>,
+    /// Marked as possibly holding mature content: apps warn once before showing it.
+    #[serde(default)]
+    pub nsfw: bool,
     pub flags: Vec<RoleFlags>,
 }
 

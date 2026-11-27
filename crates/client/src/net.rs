@@ -210,6 +210,8 @@ pub enum Command {
         member_limit: Option<u32>,
         /// Text channels only: 0 turns slow mode off.
         slow_mode_secs: Option<u32>,
+        /// Text, forum and page channels only: mark or unmark as NSFW.
+        nsfw: Option<bool>,
     },
     RenameCategory(Id, String),
     DeleteChannel(Id),
@@ -2965,10 +2967,12 @@ async fn on_command(
             audio_kbps,
             member_limit,
             slow_mode_secs,
+            nsfw,
         } => {
             let topic = topic.as_deref();
             let (limit, slow) = (member_limit, slow_mode_secs);
-            directory::rename_channel(client, &id, &name, topic, audio_kbps, limit, slow).await?;
+            directory::rename_channel(client, &id, &name, topic, audio_kbps, limit, slow, nsfw)
+                .await?;
         }
         Command::RenameCategory(id, name) => {
             directory::rename_category(client, &id, &name).await?;

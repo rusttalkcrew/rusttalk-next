@@ -54,6 +54,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         audio_kbps: 64,
         member_limit: 0,
         slow_mode_secs: 0,
+        nsfw: false,
         focus_until: None,
         flags: Vec::new(),
     };
