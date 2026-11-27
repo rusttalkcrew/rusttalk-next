@@ -43,6 +43,7 @@ fn channel(id: Id, name: &str, voice: bool) -> Channel {
         forum: false,
         audio_kbps: 64,
         member_limit: 0,
+        slow_mode_secs: 0,
         focus_until: None,
         flags: Vec::new(),
     }

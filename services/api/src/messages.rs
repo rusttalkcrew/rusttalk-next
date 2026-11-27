@@ -20,6 +20,7 @@ use crate::{
     auth::{Actor, authenticate, authenticate_read},
     channels, history, keys, page_files, payload,
     roles::{self, Permission},
+    slow_mode,
     store::audit,
 };
 
@@ -37,6 +38,10 @@ pub struct NewMessage {
     /// A page version's stored files, kept while it is the newest (see `page_files`).
     #[serde(default)]
     keep: Vec<String>,
+    /// An edit, vote, reaction or a post's second part, which slow mode doesn't count.
+    /// Apps send it only in slow mode channels; older ones never do.
+    #[serde(default)]
+    follow_up: bool,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +147,7 @@ pub async fn create(
         envelope,
         backfill_at,
         keep,
+        follow_up,
     } = payload(body)?;
     decode::<32>(&channel)?;
     let message_id = decode(&id)?;
@@ -176,6 +182,8 @@ pub async fn create(
     )
     .await?;
     reserve(&mut tx, &id).await?;
+    // Last, so a message refused for another reason doesn't start a wait.
+    slow_mode::check(&mut tx, &actor, &channel, follow_up).await?;
     let size = envelope_bytes.len();
     query(
         "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope, backfilled)
@@ -590,6 +598,7 @@ mod tests {
                 envelope: encode(&[]),
                 backfill_at,
                 keep,
+                follow_up: false,
             };
             let result = create(
                 State(app.clone()),
@@ -670,6 +679,7 @@ mod tests {
                 envelope: encode(&sealed),
                 backfill_at: Some(1),
                 keep: vec![],
+                follow_up: false,
             };
             create(
                 State(app.clone()),

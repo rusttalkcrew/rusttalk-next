@@ -83,6 +83,7 @@ pub(super) async fn rename_channel(
     topic: Option<&str>,
     audio_kbps: Option<u32>,
     member_limit: Option<u32>,
+    slow_mode_secs: Option<u32>,
 ) -> Result<()> {
     // The update also replaces category and position. Read them just before saving.
     let catalog = client.catalog().await?;
@@ -110,6 +111,9 @@ pub(super) async fn rename_channel(
     }
     if let Some(limit) = member_limit {
         body["member_limit"] = limit.into();
+    }
+    if let Some(secs) = slow_mode_secs {
+        body["slow_mode_secs"] = secs.into();
     }
     client
         .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
@@ -362,6 +366,10 @@ async fn rebuild(
         space,
         emoji,
     } = &sources;
+    client.slow_mode = (catalog.channels.iter())
+        .filter(|channel| channel.slow_mode_secs.is_some_and(|secs| secs > 0))
+        .map(|channel| channel.id)
+        .collect();
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
@@ -548,6 +556,7 @@ fn build(
                     "create_events" => perms.create_events = true,
                     "manage_events" => perms.manage_events = true,
                     "start_focus" => perms.start_focus = true,
+                    "bypass_slow_mode" => perms.bypass_slow_mode = true,
                     _ => {}
                 }
             }
@@ -628,6 +637,7 @@ fn build(
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             member_limit: channel.member_limit.unwrap_or(0),
             focus_until: channel.focus_until,
+            slow_mode_secs: channel.slow_mode_secs.unwrap_or(0),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -1146,6 +1156,7 @@ mod tests {
             audio_kbps: None,
             member_limit: None,
             focus_until: None,
+            slow_mode_secs: None,
             flags: Vec::new(),
         };
         let encrypt =

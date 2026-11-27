@@ -30,6 +30,7 @@ fn limited_home(dark: bool) -> (Home, Sent) {
             forum: false,
             audio_kbps: 64,
             member_limit: 8,
+            slow_mode_secs: 0,
             focus_until: None,
             flags: Vec::new(),
         });

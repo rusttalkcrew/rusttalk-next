@@ -1224,6 +1224,14 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
             ),
             None => t!("audit.channel_permissions_changed", actor = actor),
         },
+        "slow_mode_changed" => t!(
+            "audit.slow_mode_changed",
+            actor = actor,
+            channel = entry
+                .target_id
+                .and_then(|id| server.channel(&id))
+                .map_or_else(|| t!("audit.a_channel").into(), |c| format!("#{}", c.name))
+        ),
         "category_created" => t!("audit.category_created", actor = actor),
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),
@@ -1306,6 +1314,12 @@ fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
             })
             .map(str::to_owned)
             .collect(),
+        "slow_mode_changed" => {
+            let secs = |key: &str| details[key].as_u64().map(|secs| secs as u32);
+            let (before, after) = (secs("before")?, secs("after")?);
+            let label = crate::home::slow_mode::label;
+            vec![format!("{} → {}", label(before), label(after))]
+        }
         "file_limits_changed" => {
             let limits = |key: &str| serde_json::from_value(details[key].clone()).ok();
             file_limits::changes(limits("before")?, limits("after")?)

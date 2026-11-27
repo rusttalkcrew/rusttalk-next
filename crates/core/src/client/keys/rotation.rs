@@ -406,6 +406,7 @@ mod tests {
             audio_kbps: None,
             member_limit: None,
             focus_until: None,
+            slow_mode_secs: None,
             flags: vec![crate::client::RoleFlags {
                 role_id: "friends".into(),
                 flags: 1,

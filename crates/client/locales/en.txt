@@ -1941,3 +1941,16 @@ diagram.color_orange = Orange
 diagram.color_red = Red
 diagram.color_purple = Purple
 diagram.color_gray = Grey
+
+# crates/client/src/home/slow_mode.rs
+slow_mode.title = Slow mode
+slow_mode.help = How long each member waits between messages. People who can bypass slow mode never wait.
+slow_mode.off = Off
+slow_mode.seconds = {seconds} s
+slow_mode.minutes = {minutes} min
+slow_mode.hours = {hours} h
+slow_mode.wait = You can send again in {seconds} s
+slow_mode.header_tip = Slow mode is on: one message every {time}
+perm.bypass_slow_mode = Bypass slow mode
+perm.bypass_slow_mode_help = Send messages in slow mode channels without waiting.
+audit.slow_mode_changed = {actor} changed slow mode in {channel}

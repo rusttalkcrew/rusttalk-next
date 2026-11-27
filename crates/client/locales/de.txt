@@ -1937,3 +1937,16 @@ diagram.color_orange = Orange
 diagram.color_red = Rot
 diagram.color_purple = Lila
 diagram.color_gray = Grau
+
+# crates/client/src/home/slow_mode.rs
+slow_mode.title = Langsamer Modus
+slow_mode.help = Wie lange jedes Mitglied zwischen Nachrichten warten muss. Wer den langsamen Modus umgehen darf, wartet nie.
+slow_mode.off = Aus
+slow_mode.seconds = {seconds} Sek.
+slow_mode.minutes = {minutes} Min.
+slow_mode.hours = {hours} Std.
+slow_mode.wait = Du kannst in {seconds} Sek. wieder senden
+slow_mode.header_tip = Langsamer Modus ist an: eine Nachricht alle {time}
+perm.bypass_slow_mode = Langsamen Modus umgehen
+perm.bypass_slow_mode_help = In Kanälen mit langsamem Modus ohne Wartezeit Nachrichten senden.
+audit.slow_mode_changed = {actor} hat den langsamen Modus in {channel} geändert
