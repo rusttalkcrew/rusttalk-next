@@ -4,8 +4,8 @@
 use reqwest::Method;
 use rusttalk_core::{
     auth::{
-        FileLimits, FileSettings, MessageHistory, RateLimitPreset, RateLimits, ServerUpdates,
-        decode, encode,
+        FileLimits, FileSettings, MessageHistory, NewMemberRules, RateLimitPreset, RateLimits,
+        ServerUpdates, decode, encode,
     },
     client::KeyClient,
     keys::{Metadata, random_key},
@@ -73,6 +73,9 @@ pub enum Admin {
     SaveHistory(i64),
     LoadRateLimits,
     SaveRateLimits(RateLimitPreset),
+    LoadNewMembers,
+    /// How long the new member rules last after joining, in seconds; 0 is off.
+    SaveNewMembers(i64),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -178,6 +181,8 @@ pub enum AdminUpdate {
     History(Option<MessageHistory>),
     /// `None` from a server too old to change it.
     RateLimits(Option<RateLimits>),
+    /// `None` from a server too old to have new member rules.
+    NewMembers(Option<NewMemberRules>),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -333,14 +338,14 @@ async fn change(
                 t!("admin.done_file_limits")
             }),
         Admin::LoadHistory => {
-            match message_history(client, Method::GET, None).await {
+            match newer_setting(client, HISTORY, Method::GET, None).await {
                 Ok(history) => send(AdminUpdate::History(history)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
             return None;
         }
         Admin::SaveHistory(keep) => {
-            message_history(client, Method::PUT, Some(json!({ "keep": keep })))
+            newer_setting(client, HISTORY, Method::PUT, Some(json!({ "keep": keep })))
                 .await
                 .map(|history| {
                     send(AdminUpdate::History(history));
@@ -354,6 +359,13 @@ async fn change(
             }
             return None;
         }
+        Admin::LoadNewMembers => {
+            match newer_setting(client, NEW_MEMBERS, Method::GET, None).await {
+                Ok(rules) => send(AdminUpdate::NewMembers(rules)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return None;
+        }
         Admin::SaveRateLimits(preset) => {
             let body = Some(json!({ "preset": preset }));
             newer_setting(client, RATE_LIMITS, Method::PUT, body)
@@ -363,6 +375,17 @@ async fn change(
                     t!("admin.done_rate_limits")
                 })
         }
+        Admin::SaveNewMembers(secs) => newer_setting(
+            client,
+            NEW_MEMBERS,
+            Method::PUT,
+            Some(json!({ "secs": secs })),
+        )
+        .await
+        .map(|rules| {
+            send(AdminUpdate::NewMembers(rules));
+            t!("admin.done_new_members")
+        }),
         Admin::LoadUpdates => {
             match get(client, "/v1/settings/updates").await {
                 Ok(value) => match serde_json::from_value(value) {
@@ -1009,13 +1032,8 @@ async fn file_settings(
         .map_err(|error| failed(&error.into()))
 }
 
-async fn message_history(
-    client: &KeyClient<'_>,
-    method: Method,
-    body: Option<Value>,
-) -> Result<Option<MessageHistory>, String> {
-    newer_setting(client, "/v1/settings/message-history", method, body).await
-}
+const HISTORY: &str = "/v1/settings/message-history";
+const NEW_MEMBERS: &str = "/v1/settings/new-member-rules";
 
 const RATE_LIMITS: &str = "/v1/settings/rate-limits";
 
@@ -1095,6 +1113,8 @@ fn problem(code: &str) -> &'static str {
         "invalid_member_cap" => t!("admin.invalid_member_cap"),
         "invalid_file_limits" => t!("admin.invalid_file_limits"),
         "invalid_message_history" => t!("admin.invalid_message_history"),
+        "invalid_new_member_rules" => t!("admin.invalid_new_members"),
+        "new_member_rules" => t!("new_members.refused"),
         "invalid_listing" | "invalid_listing_settings" => {
             t!("admin.invalid_listing")
         }

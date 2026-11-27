@@ -168,6 +168,7 @@ pub async fn upload(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     app.limits.upload(&actor)?;
     messages::require_write(&mut tx, &actor, &channel).await?;
+    crate::new_members::check(&mut tx, &actor).await?;
     let files = &app.files;
     let max_file = file_settings::effective(&mut tx, files)
         .await?

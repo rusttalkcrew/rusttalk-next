@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{Event, KeyClient, MessageBody, MessageError, SlowMode},
+    client::{Event, KeyClient, MessageBody, MessageError, SlowMode, UploadRejected},
     keys::{self, KeyState, Metadata, Scope},
     messages::{
         Ballot, MessageContext, Poll, PollPart, Reaction, ReactionEmoji, reaction_vote, tally,
@@ -427,7 +427,97 @@ pub(super) async fn scenario(
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
     slow_mode(a, b, c, text).await?;
+    new_member_rules(a, b, c, text).await?;
     Ok((dm, b_message))
+}
+
+/// #664: only a server manager turns on new member rules, which is audited. C, who just
+/// joined with only the default role, then may not upload files or start a DM; B, a
+/// moderator, may. Turned off, C uploads again.
+async fn new_member_rules(
+    a: &KeyClient<'_>,
+    b: &KeyClient<'_>,
+    c: &KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    const PATH: &str = "/v1/settings/new-member-rules";
+    let set = |client: &KeyClient<'_>, secs: i64| {
+        (client.request(Method::PUT, PATH))
+            .json(&json!({ "secs": secs }))
+            .send()
+    };
+    rejected(
+        set(b, 3600).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    set(a, 3600).await?.error_for_status()?;
+    ensure!(
+        me(c).await?["new_member_until"].is_i64(),
+        "C is not a new member"
+    );
+    ensure!(
+        me(b).await?.get("new_member_until").is_none(),
+        "B is a new member"
+    );
+
+    async fn upload(client: &KeyClient<'_>, channel: &[u8; 32]) -> Result<()> {
+        (client.upload_file(
+            channel,
+            "664.bin",
+            "application/octet-stream",
+            &[6; 64],
+            None,
+        ))
+        .await
+        .map(drop)
+    }
+    let refused = upload(c, &text.id)
+        .await
+        .err()
+        .context("a new member uploaded a file")?;
+    let code = refused
+        .downcast_ref::<UploadRejected>()
+        .map(|r| r.code.as_str());
+    assert_eq!(code, Some("new_member_rules"));
+    upload(b, &text.id).await?;
+    let dm = c
+        .request(Method::POST, "/v1/dms")
+        .json(&json!({
+            "id": encode(&keys::random_key()?[..]),
+            "peer": encode(a.identity.certificate.person_id()),
+            "commitment": encode(&[0; 32]),
+            "envelope": "",
+        }))
+        .send()
+        .await?;
+    rejected(dm, StatusCode::FORBIDDEN, "new_member_rules").await?;
+
+    let audit: Vec<Value> = (a.request(Method::GET, "/v1/audit").send().await?)
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit
+            .iter()
+            .any(|row| row["action"] == "new_member_rules_changed"
+                && row["details"]["after"] == 3600),
+        "missing new member rules audit"
+    );
+    set(a, 0).await?.error_for_status()?;
+    upload(c, &text.id).await?;
+    println!(
+        "#664 verified new member rules: managed, audited, enforced for new default members only"
+    );
+    Ok(())
+}
+
+async fn me(client: &KeyClient<'_>) -> Result<Value> {
+    Ok((client.request(Method::GET, "/v1/me").send().await?)
+        .error_for_status()?
+        .json()
+        .await?)
 }
 
 /// A posts a poll, B and C vote (B changes their mind), and A counts the votes it reads.

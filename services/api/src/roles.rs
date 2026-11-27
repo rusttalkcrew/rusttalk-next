@@ -45,6 +45,8 @@ pub enum Permission {
     StartFocus = 32768,
     /// Post in a slow mode channel without waiting.
     BypassSlowMode = 65536,
+    /// Skip the new member rules (see `new_members`).
+    SkipNewMemberRules = 131072,
 }
 
 const PERMISSIONS: [Permission; 17] = [
@@ -65,6 +67,7 @@ const PERMISSIONS: [Permission; 17] = [
     Permission::ManageEvents,
     Permission::StartFocus,
     Permission::BypassSlowMode,
+    Permission::SkipNewMemberRules,
 ];
 
 #[derive(FromRow)]

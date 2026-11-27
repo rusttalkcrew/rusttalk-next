@@ -124,6 +124,7 @@ pub async fn create(
     app.dm_starts.take(actor.person, now()?)?;
     // Only a new conversation counts: reopening one is free.
     app.limits.check(&actor, limits::Action::NewDm)?;
+    crate::new_members::check(&mut tx, &actor).await?;
     let reserved = query("INSERT INTO channel_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
         .execute(&mut *tx)

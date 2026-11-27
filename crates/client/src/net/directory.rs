@@ -780,6 +780,7 @@ fn build(
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         hide_offline: me["hide_offline"].as_bool(),
+        new_member_until: me["new_member_until"].as_i64(),
         my_name_hidden,
         bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
         me: *client.identity.certificate.person_id(),

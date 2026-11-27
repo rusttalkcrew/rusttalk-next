@@ -1092,6 +1092,7 @@ fn upload_problem(error: &anyhow::Error) -> String {
         (_, Some("file_too_large")) => t!("files.err_too_large"),
         (_, Some("file_member_quota")) => t!("files.err_member_quota"),
         (_, Some("file_server_quota")) => t!("files.err_server_quota"),
+        (_, Some("new_member_rules")) => t!("new_members.refused"),
         (Some(StatusCode::PAYLOAD_TOO_LARGE), _) => {
             t!("files.err_no_room")
         }

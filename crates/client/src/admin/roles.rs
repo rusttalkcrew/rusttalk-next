@@ -227,7 +227,12 @@ fn member_rank(dir: &Directory, member: &Member) -> i64 {
 type Permission = (&'static str, &'static str, &'static str, bool);
 
 /// The permissions in groups, with the group titles.
-fn groups(events: bool, focus: bool, slow: bool) -> Vec<(&'static str, Vec<Permission>)> {
+fn groups(
+    events: bool,
+    focus: bool,
+    slow: bool,
+    new_members: bool,
+) -> Vec<(&'static str, Vec<Permission>)> {
     let mut groups = vec![
         (
             t!("admin.group_general"),
@@ -321,6 +326,11 @@ fn groups(events: bool, focus: bool, slow: bool) -> Vec<(&'static str, Vec<Permi
             "bypass_slow_mode",
             t!("perm.bypass_slow_mode"),
             t!("perm.bypass_slow_mode_help"),
+    if new_members {
+        groups[2].1.push((
+            "skip_new_member_rules",
+            t!("perm.skip_new_member_rules"),
+            t!("perm.skip_new_member_rules_help"),
             false,
         ));
     }
@@ -809,12 +819,16 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
     let chosen = page
         .permissions
         .get_or_insert_with(|| role.permissions.clone());
-    // Servers that know focus mode or slow mode gave it to the owner role, which keeps every
-    // permission.
-    let focus = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "start_focus"));
-    let slow =
-        (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "bypass_slow_mode"));
-    let groups = groups(dir.calendar.is_some(), focus, slow);
+    // Servers that know focus mode, slow mode or new member rules gave them to the owner
+    // role, which keeps every permission.
+    let knows =
+        |name: &str| (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == name));
+    let groups = groups(
+        dir.calendar.is_some(),
+        knows("start_focus"),
+        knows("bypass_slow_mode"),
+        knows("skip_new_member_rules"),
+    );
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);

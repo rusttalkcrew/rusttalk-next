@@ -103,6 +103,9 @@ pub struct Me {
     /// This member's own presence choice; never shown to others.
     status: rusttalk_core::presence::Status,
     hide_offline: bool,
+    /// While the new member rules apply to this member: when they end, in unix seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_member_until: Option<i64>,
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
@@ -119,6 +122,7 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         .collect();
     let status = crate::presence::stored(&mut tx, &actor.person).await?;
     let status = crate::presence::status_for(status, crate::presence::knows_dnd(&headers));
+    let new_member_until = crate::new_members::until(&mut tx, &actor.person, actor.at).await?;
     tx.commit().await?;
     Ok(Json(Me {
         person_id: encode(&actor.person),
@@ -127,6 +131,7 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         role_ids,
         status,
         hide_offline,
+        new_member_until,
     }))
 }
 
@@ -165,6 +170,7 @@ pub async fn invite(
         .await?
         .require(Permission::Invite)?;
     app.limits.check(&actor, crate::limits::Action::Invite)?;
+    crate::new_members::check(&mut tx, &actor).await?;
     let expires_at = actor.at + ttl_seconds;
     query("DELETE FROM invites WHERE expires_at <= ?")
         .bind(actor.at)

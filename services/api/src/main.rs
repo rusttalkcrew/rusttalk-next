@@ -13,6 +13,7 @@ mod limits;
 mod members;
 mod messages;
 mod metadata;
+mod new_members;
 mod page_files;
 mod presence;
 mod roles;
@@ -351,6 +352,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/message-history",
             get(history::get).put(history::set),
+        )
+        .route(
+            "/v1/settings/new-member-rules",
+            get(new_members::get).put(new_members::set),
         )
         .route(
             "/v1/settings/open-joining",

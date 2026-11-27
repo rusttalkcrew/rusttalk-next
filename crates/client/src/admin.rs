@@ -6,6 +6,7 @@ mod file_limits;
 
 mod history;
 mod rate_limits;
+mod new_members;
 
 mod import;
 
@@ -69,6 +70,8 @@ pub enum Tab {
     History,
     /// How fast members may post, upload and so on.
     RateLimits,
+    /// How long the new member rules last.
+    NewMembers,
     /// The owner's public listing.
     Listing,
     /// Server emoji.
@@ -100,6 +103,7 @@ pub struct Settings {
     files: Option<file_limits::Form>,
     history: Option<history::Form>,
     rate_limits: Option<rate_limits::Form>,
+    new_members: Option<new_members::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -174,6 +178,9 @@ impl Settings {
             AdminUpdate::RateLimits(saved) => match &mut self.rate_limits {
                 Some(form) if form.unsaved() => form.saved(saved),
                 limits => *limits = Some(rate_limits::Form::new(saved)),
+            AdminUpdate::NewMembers(saved) => match &mut self.new_members {
+                Some(form) if form.unsaved() => form.saved(saved),
+                rules => *rules = Some(new_members::Form::new(saved)),
             },
             AdminUpdate::Listing(on, saved) => {
                 let saved = (on, saved.unwrap_or_default());
@@ -250,6 +257,7 @@ impl Settings {
             || self.files.as_ref().is_some_and(file_limits::Form::unsaved)
             || self.history.as_ref().is_some_and(history::Form::unsaved)
             || (self.rate_limits.as_ref()).is_some_and(rate_limits::Form::unsaved)
+            || (self.new_members.as_ref()).is_some_and(new_members::Form::unsaved)
             || self.joining_unsaved()
             || self.listing_unsaved()
             || self.emoji.unsaved()
@@ -351,6 +359,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     }
     if tab == Tab::RateLimits {
         server.send(Command::Admin(Admin::LoadRateLimits));
+    if tab == Tab::NewMembers {
+        server.send(Command::Admin(Admin::LoadNewMembers));
     }
     home.server_settings = Some(Settings {
         server: index,
@@ -366,6 +376,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         files: None,
         history: None,
         rate_limits: None,
+        new_members: None,
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -576,7 +587,15 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             ),
             group(
                 t!("admin.moderation"),
-                vec![page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit)],
+                vec![
+                    page(
+                        Tab::NewMembers,
+                        "🌱",
+                        t!("admin.new_members"),
+                        perms.manage_server,
+                    ),
+                    page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit),
+                ],
             ),
         ];
         let before = settings.tab;
@@ -640,6 +659,9 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         if let Some(form) = &mut settings.rate_limits {
                             form.show(ui, perms.manage_server)
                                 .map(Admin::SaveRateLimits)
+                    Tab::NewMembers => {
+                        if let Some(form) = &mut settings.new_members {
+                            form.show(ui).map(Admin::SaveNewMembers)
                         } else {
                             loading(ui, settings);
                             None
@@ -681,6 +703,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::Files => Some(Admin::LoadFiles),
                 Tab::History => Some(Admin::LoadHistory),
                 Tab::RateLimits => Some(Admin::LoadRateLimits),
+                Tab::NewMembers => Some(Admin::LoadNewMembers),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
@@ -1218,6 +1241,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_roles_changed" => t!("audit.member_roles_changed", actor = actor, target = target),
         "server_updated" => t!("audit.server_updated", actor = actor),
         "file_limits_changed" => t!("audit.file_limits_changed", actor = actor),
+        "new_member_rules_changed" => t!("audit.new_member_rules_changed", actor = actor),
         "listing_changed" if entry.details["enabled"] == true => t!("audit.listed", actor = actor),
         "listing_changed" => t!("audit.unlisted", actor = actor),
         "ownership_transferred" => t!(
@@ -1347,6 +1371,11 @@ fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
         "file_limits_changed" => {
             let limits = |key: &str| serde_json::from_value(details[key].clone()).ok();
             file_limits::changes(limits("before")?, limits("after")?)
+        }
+        "new_member_rules_changed" => {
+            let (before, after) = (details["before"].as_i64()?, details["after"].as_i64()?);
+            let label = new_members::label;
+            vec![format!("{} → {}", label(before), label(after))]
         }
         _ => Vec::new(),
     };
