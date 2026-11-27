@@ -343,7 +343,11 @@ pub(crate) async fn trim(
     Ok(dropped)
 }
 
-async fn uncount(db: &mut SqliteConnection, channel: &str, removed: u64) -> ApiResult<()> {
+pub(crate) async fn uncount(
+    db: &mut SqliteConnection,
+    channel: &str,
+    removed: u64,
+) -> ApiResult<()> {
     query("UPDATE channels SET message_count = message_count - ? WHERE id = ?")
         .bind(removed as i64)
         .bind(channel)

@@ -296,6 +296,23 @@ pub struct Directory {
     pub packs_max: usize,
     /// `None` on servers from before events.
     pub calendar: Option<Calendar>,
+    /// Lockdown, for people who may change it on servers that have it.
+    pub lockdown: Option<Lockdown>,
+}
+
+/// Lockdown (#665): while on, nobody new joins.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Lockdown {
+    pub locked: bool,
+    /// Turned on by a spike of joins, not a person. Not sent when saving.
+    #[serde(default, skip_serializing)]
+    pub automatic: bool,
+    /// Shown to people who try to join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// This many joins within `auto_secs` turn it on; 0 is off.
+    pub auto_joins: i64,
+    pub auto_secs: i64,
 }
 
 /// The server's events, as far as this person may see them.
@@ -401,6 +418,10 @@ pub struct Perms {
     pub manage_events: bool,
     /// Put a channel into focus mode for a while.
     pub start_focus: bool,
+    /// Turn lockdown on or off and set automatic lockdown.
+    pub lock_down: bool,
+    /// When banning, also remove what the person posted lately.
+    pub remove_recent_messages: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
     /// "View server as" is on: these are a preview, and nothing may be changed.

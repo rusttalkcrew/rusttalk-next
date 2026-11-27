@@ -9,6 +9,7 @@ mod files;
 mod history;
 mod index;
 mod keys;
+mod lockdown;
 mod members;
 mod messages;
 mod metadata;
@@ -73,6 +74,8 @@ struct App {
     presence: Arc<presence::Sessions>,
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
+    /// Recent join times, for automatic lockdown.
+    joins: Arc<lockdown::Joins>,
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
     session_ttl: i64,
@@ -119,6 +122,8 @@ struct ApiError {
     code: &'static str,
     /// The underlying error for the server log only, such as SQLite's message.
     detail: Option<String>,
+    /// Text for the person refused, sent as `message`: only a lockdown's notice.
+    message: Option<String>,
 }
 
 impl ApiError {
@@ -127,6 +132,7 @@ impl ApiError {
             status,
             code,
             detail: None,
+            message: None,
         }
     }
     fn bad_request(code: &'static str) -> Self {
@@ -184,7 +190,14 @@ impl IntoResponse for ApiError {
         } else {
             tracing::warn!(reason = self.code, "request rejected");
         }
-        (self.status, Json(json!({ "error": self.code }))).into_response()
+        match self.message {
+            Some(message) => (
+                self.status,
+                Json(json!({ "error": self.code, "message": message })),
+            )
+                .into_response(),
+            None => (self.status, Json(json!({ "error": self.code }))).into_response(),
+        }
     }
 }
 
@@ -252,6 +265,7 @@ async fn run() -> Result<()> {
                 changes: broadcast::channel(CHANGE_BACKLOG).0,
                 presence: Arc::default(),
                 listing_changed: watch::channel(()).0,
+                joins: Default::default(),
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
                 session_ttl: auth::session_ttl()?,
             })
@@ -325,6 +339,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/open-joining",
             get(members::open_joining).put(members::set_open_joining),
+        )
+        .route(
+            "/v1/settings/lockdown",
+            get(lockdown::get).put(lockdown::set),
         )
         .route("/v1/auth/join", post(auth::open_join))
         .route("/v1/auth/challenge", get(auth::challenge))

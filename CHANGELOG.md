@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Raid tools: lock your server down so nobody new can join, automatically when many people join at once, and remove a banned person's messages from the last hour, day or week.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

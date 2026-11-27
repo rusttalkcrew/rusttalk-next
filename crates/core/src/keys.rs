@@ -228,6 +228,9 @@ pub enum Part {
     Space,
     Emoji,
     Calendar,
+    /// Lockdown (#665): whether new people may join. Apps whose person may change it reload
+    /// it; older apps read it as `Other`.
+    Lockdown,
     /// A part this app doesn't know yet, from a newer server: reload everything.
     #[serde(other)]
     Other,
