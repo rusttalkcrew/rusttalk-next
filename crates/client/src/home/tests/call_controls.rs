@@ -447,8 +447,22 @@ fn the_whole_call_goes_full_screen() {
             assert!(h.query_by_label(t!("call.voice_connected")).is_none());
             assert!(h.query_by_label(t!("layout.hide_chat")).is_none());
             assert!(h.query_by_label(t!("call.exit_full_screen")).is_some());
-            assert!(h.query_by_label(t!("call.leave")).is_some(), "{size:?}");
+            // The call's buttons float over the bottom, and hide when idle.
+            let leave = h.get_by_label(t!("call.leave")).rect();
+            assert!(leave.bottom() > size.y - 80.0, "{size:?}: {leave:?}");
             capture(&mut h, size, dark, "whole");
+            for _ in 0..2 {
+                h.input_mut().time = Some(1000.0);
+                h.step();
+            }
+            assert!(h.query_by_label(t!("call.leave")).is_none(), "{size:?}");
+            capture(&mut h, size, dark, "whole-idle");
+            h.hover_at(egui::pos2(size.x / 2.0, size.y / 2.0));
+            for _ in 0..2 {
+                h.input_mut().time = Some(1000.5);
+                h.step();
+            }
+            assert!(h.query_by_label(t!("call.leave")).is_some(), "{size:?}");
 
             h.key_press(egui::Key::Escape);
             h.run_steps(3);

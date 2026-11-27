@@ -4694,17 +4694,13 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     ui.allocate_rect(area, Sense::hover());
 }
 
-/// The call view covering the window, with the call's controls along the bottom:
-/// the sidebar and its voice panel are hidden.
+/// The call view covering the window, with the call's buttons floating over its
+/// bottom while the pointer moves, as in a full-screen tile.
 fn whole_call(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
-    let mut area = ui.available_rect_before_wrap();
-    let top = area.bottom() - ui::TOUCH_TARGET;
-    let bar = Rect::from_min_max(egui::pos2(area.left(), top), area.max);
-    area.max.y = top - ui::SPACE_S;
-    let mut row = ui.new_child(UiBuilder::new().max_rect(bar));
-    call::phone_controls(&mut row, home);
+    let area = ui.available_rect_before_wrap();
     let mut stage = ui.new_child(UiBuilder::new().max_rect(area));
     call::stage(&mut stage, home, index, channel);
+    call::whole_controls(ui, home, area);
 }
 
 /// Where a queued message goes: a channel by its server's address, or a DM.
