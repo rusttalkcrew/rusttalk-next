@@ -894,7 +894,7 @@ mod tests {
         harness.get_by_label(t!("admin.ban")).click();
         harness.run_steps(4);
         let banned = std::iter::from_fn(|| sent.try_recv().ok()).any(
-            |command| matches!(command, Command::Admin(Admin::Ban(person, false)) if person == ANN),
+            |command| matches!(command, Command::Admin(Admin::Ban(person, false, None)) if person == ANN),
         );
         assert!(banned);
         let address = harness.state().as_ref().unwrap().servers[0].address.clone();

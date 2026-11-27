@@ -232,6 +232,7 @@ fn groups(
     focus: bool,
     slow: bool,
     new_members: bool,
+    raid: bool,
 ) -> Vec<(&'static str, Vec<Permission>)> {
     let mut groups = vec![
         (
@@ -336,6 +337,22 @@ fn groups(
             t!("perm.skip_new_member_rules_help"),
             false,
         ));
+    }
+    if raid {
+        groups[2].1.extend([
+            (
+                "lock_down",
+                t!("perm.lock_down"),
+                t!("perm.lock_down_help"),
+                false,
+            ),
+            (
+                "remove_recent_messages",
+                t!("perm.remove_recent_messages"),
+                t!("perm.remove_recent_messages_help"),
+                true,
+            ),
+        ]);
     }
     if events {
         groups.push((
@@ -822,8 +839,8 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
     let chosen = page
         .permissions
         .get_or_insert_with(|| role.permissions.clone());
-    // Servers that know focus mode, slow mode or new member rules gave them to the owner
-    // role, which keeps every permission.
+    // Servers that know focus mode, slow mode, new member rules or raid tools gave them to
+    // the owner role, which keeps every permission.
     let knows =
         |name: &str| (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == name));
     let mut groups = groups(
@@ -831,6 +848,7 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
         knows("start_focus"),
         knows("bypass_slow_mode"),
         knows("skip_new_member_rules"),
+        knows("lock_down"),
     );
     // Likewise for timeouts, which older servers refuse.
     if knows("timeout_members") {

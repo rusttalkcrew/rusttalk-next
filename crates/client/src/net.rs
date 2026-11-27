@@ -1527,14 +1527,14 @@ async fn session<'a>(
         api.protocol = protocol.flatten().unwrap_or(1);
         return Ok((api, session, (dm_backfill, max_files)));
     }
-    let code = reply
-        .json::<Value>()
-        .await
-        .ok()
-        .and_then(|body| body["error"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    let body = reply.json::<Value>().await.unwrap_or_default();
+    let code = body["error"].as_str().unwrap_or_default().to_owned();
     tracing::warn!(%status, code, "sign-in refused");
     Err(match code.as_str() {
+        "server_locked" => Failure::Stop(match body["message"].as_str() {
+            Some(message) => t!("net.locked_with_message", message = message),
+            None => t!("net.locked").into(),
+        }),
         "invite_required" if matches!(admission, None | Some(Admission::Member)) => {
             Failure::Stop(t!("net.not_member").into())
         }

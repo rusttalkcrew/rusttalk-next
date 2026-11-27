@@ -640,6 +640,84 @@ async fn docker_keys(
     Ok(())
 }
 
+/// W665: lockdown turns away someone new with its message, lifting it lets them in, and a
+/// ban can remove what they posted lately.
+async fn raid_tools(
+    owner_bot: &Server,
+    owner: &Session,
+    bot: &Server,
+    owner_keys: &mut KeyClient<'_>,
+    secrets: &mut Vec<String>,
+) -> Result<()> {
+    const PATH: &str = "/v1/settings/lockdown";
+    let message = "W665 Quartz lockdown notice";
+    // Sealed at rest and never logged: the final log check looks for it.
+    secrets.push(message.into());
+    let save = |locked: bool| {
+        owner_bot
+            .request(Method::PUT, PATH)
+            .bearer_auth(&owner.token)
+            .json(
+                &json!({"locked": locked, "message": message, "auto_joins": 10, "auto_secs": 120}),
+            )
+            .send()
+    };
+    assert_eq!(save(true).await?.status(), StatusCode::NO_CONTENT);
+    let (_, raider) = DeviceIdentity::create("W665 Raider")?;
+    let (_, link) = invite(owner_keys, secrets).await?;
+    let reply = bot.sign_in(&raider, Some(&link.code)).await?;
+    assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+    let body: Value = reply.json().await?;
+    assert!(body["error"] == "server_locked" && body["message"] == message);
+    let shown: Value = owner_bot
+        .request(Method::GET, PATH)
+        .bearer_auth(&owner.token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(shown["locked"] == true && shown["message"] == message && shown["automatic"] == false);
+    assert_eq!(save(false).await?.status(), StatusCode::NO_CONTENT);
+    let raider_session = session(bot.sign_in(&raider, Some(&link.code)).await?, secrets).await?;
+    check_me(bot, &raider_session, StatusCode::OK).await?;
+    println!("W665 lockdown turned away a new person with its notice; lifting it let them join");
+
+    let ban_path = format!("/v1/bans/{}", encode(raider.certificate.person_id()));
+    let ban = |secs: i64| {
+        owner_bot
+            .request(Method::PUT, &ban_path)
+            .bearer_auth(&owner.token)
+            .json(&json!({"remove_secs": secs}))
+            .send()
+    };
+    rejected(
+        ban(60).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_remove_window",
+    )
+    .await?;
+    assert_eq!(ban(3600).await?.status(), StatusCode::NO_CONTENT);
+    check_me(bot, &raider_session, StatusCode::UNAUTHORIZED).await?;
+    for action in [
+        "lockdown_started",
+        "lockdown_ended",
+        "recent_messages_removed",
+    ] {
+        let audit: Vec<Value> = owner_bot
+            .request(Method::GET, &format!("/v1/audit?action={action}"))
+            .bearer_auth(&owner.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(!audit.is_empty(), "missing audit action {action}");
+    }
+    println!("W665 a ban removed the last hour's messages, and the audit log has every step");
+    Ok(())
+}
+
 #[test]
 fn docker_membership() -> Result<()> {
     // The whole scenario is one deep async chain; with every step added, a debug build
@@ -884,6 +962,15 @@ async fn membership() -> Result<()> {
     .await?;
     check_me(&member_bot, &unbanned, StatusCode::OK).await?;
     println!("unban let bot B redeem the same invite and sign in again");
+
+    Box::pin(raid_tools(
+        &owner_bot,
+        &owner,
+        &member_bot,
+        &mut owner_keys,
+        &mut secrets,
+    ))
+    .await?;
 
     let (invite_id, withdrawn) = invite(&mut owner_keys, &mut secrets).await?;
     let reply = owner_bot

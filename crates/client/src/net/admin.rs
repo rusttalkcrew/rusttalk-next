@@ -40,8 +40,9 @@ pub enum Admin {
         from: Id,
         to: Option<Id>,
     },
-    /// Ban a person, and (`true`) the networks they use.
-    Ban(Id, bool),
+    /// Ban a person, and (`true`) the networks they use, and (`Some`) remove what they
+    /// posted in that many seconds before.
+    Ban(Id, bool, Option<i64>),
     Unban(Id),
     /// Replace a member's roles.
     SetRoles(Id, Vec<String>),
@@ -73,6 +74,8 @@ pub enum Admin {
     },
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
+    /// Lockdown on or off, its message and automatic lockdown.
+    SaveLockdown(crate::server::Lockdown),
     LoadFiles,
     SaveFiles(FileLimits),
     LoadHistory,
@@ -490,9 +493,13 @@ async fn change(
             }
             .map(|()| t!("admin.done_voice"))
         }
-        Admin::Ban(person, network) => {
+        Admin::Ban(person, network, remove_secs) => {
             let path = format!("/v1/bans/{}", encode(&person));
-            call(client, Method::PUT, &path, Some(json!({"ban_ip": network})))
+            let mut body = json!({"ban_ip": network});
+            if let Some(secs) = remove_secs {
+                body["remove_secs"] = secs.into();
+            }
+            call(client, Method::PUT, &path, Some(body))
                 .await
                 .map(|()| t!("admin.done_banned"))
                 .map_err(|text| match text == problem("role_hierarchy") && network {
@@ -561,6 +568,20 @@ async fn change(
                     send(AdminUpdate::Joining(open, cap));
                     t!("admin.done_joining")
                 })
+        }
+        Admin::SaveLockdown(lockdown) => {
+            let done = match lockdown.locked {
+                true => t!("admin.done_locked"),
+                false => t!("admin.done_lockdown_saved"),
+            };
+            call(
+                client,
+                Method::PUT,
+                "/v1/settings/lockdown",
+                Some(json!(lockdown)),
+            )
+            .await
+            .map(|()| done)
         }
         Admin::SaveListing(listing) => {
             let body = match listing {

@@ -10,6 +10,7 @@ mod history;
 mod index;
 mod keys;
 mod limits;
+mod lockdown;
 mod members;
 mod messages;
 mod metadata;
@@ -77,6 +78,8 @@ struct App {
     presence: Arc<presence::Sessions>,
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
+    /// Recent join times, for automatic lockdown.
+    joins: Arc<lockdown::Joins>,
     files: Arc<files::Files>,
     emoji: Arc<emoji::Emoji>,
     limits: Arc<limits::Limits>,
@@ -128,6 +131,8 @@ struct ApiError {
     /// For 429s: the seconds until the request may succeed, sent as `Retry-After` and
     /// `retry_after`.
     retry_after: Option<i64>,
+    /// Text for the person refused, sent as `message`: only a lockdown's notice.
+    message: Option<String>,
 }
 
 impl ApiError {
@@ -137,6 +142,7 @@ impl ApiError {
             code,
             detail: None,
             retry_after: None,
+            message: None,
         }
     }
     fn bad_request(code: &'static str) -> Self {
@@ -201,14 +207,18 @@ impl IntoResponse for ApiError {
             // Rate limits log once a minute per person themselves, not every refusal.
             tracing::warn!(reason = self.code, "request rejected");
         }
+        let mut body = json!({ "error": self.code });
+        if let Some(secs) = self.retry_after {
+            body["retry_after"] = secs.into();
+        }
+        if let Some(message) = self.message {
+            body["message"] = message.into();
+        }
         match self.retry_after {
-            Some(secs) => (
-                self.status,
-                [(RETRY_AFTER, secs.to_string())],
-                Json(json!({ "error": self.code, "retry_after": secs })),
-            )
-                .into_response(),
-            None => (self.status, Json(json!({ "error": self.code }))).into_response(),
+            Some(secs) => {
+                (self.status, [(RETRY_AFTER, secs.to_string())], Json(body)).into_response()
+            }
+            None => (self.status, Json(body)).into_response(),
         }
     }
 }
@@ -279,6 +289,7 @@ async fn run() -> Result<()> {
                 changes: broadcast::channel(CHANGE_BACKLOG).0,
                 presence: Arc::default(),
                 listing_changed: watch::channel(()).0,
+                joins: Default::default(),
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
                 session_ttl: auth::session_ttl()?,
                 dm_starts: Arc::new(dms::Starts::from_env()?),
@@ -365,6 +376,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/open-joining",
             get(members::open_joining).put(members::set_open_joining),
+        )
+        .route(
+            "/v1/settings/lockdown",
+            get(lockdown::get).put(lockdown::set),
         )
         .route("/v1/auth/join", post(auth::open_join))
         .route("/v1/auth/challenge", get(auth::challenge))

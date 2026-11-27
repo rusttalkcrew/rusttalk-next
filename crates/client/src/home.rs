@@ -2428,6 +2428,7 @@ pub fn show(
                     if !show_compatibility(ui, home, index) {
                         return;
                     }
+                    crate::admin::lockdown_banner(ui, home, index);
                     match home.servers[index].open {
                         Some(channel) if home.servers[index].is_voice(&channel) => {
                             voice_pane(ui, home, index, channel)
@@ -8150,6 +8151,7 @@ mod tests {
     mod image_reload;
     mod joining;
     mod link_names;
+    mod lockdown;
     mod long_chat;
     mod member_list;
     mod menus;

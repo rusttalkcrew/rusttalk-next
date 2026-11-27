@@ -49,9 +49,13 @@ pub enum Permission {
     SkipNewMemberRules = 131072,
     /// Stop a lower-ranked member from writing and talking for a while.
     TimeoutMembers = 262144,
+    /// Turn lockdown on or off and set automatic lockdown: nobody new joins while it's on.
+    LockDown = 524288,
+    /// When banning someone, also remove what they posted in the last hour, day or week.
+    RemoveRecentMessages = 1048576,
 }
 
-const PERMISSIONS: [Permission; 19] = [
+const PERMISSIONS: [Permission; 21] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -71,6 +75,8 @@ const PERMISSIONS: [Permission; 19] = [
     Permission::BypassSlowMode,
     Permission::SkipNewMemberRules,
     Permission::TimeoutMembers,
+    Permission::LockDown,
+    Permission::RemoveRecentMessages,
 ];
 
 #[derive(FromRow)]

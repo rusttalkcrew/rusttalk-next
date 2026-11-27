@@ -223,7 +223,27 @@ pub(super) async fn directory(
         space,
         emoji,
     };
-    rebuild(ctx, url, client, state, sources, calendar).await
+    let lockdown = lockdown(client, &sources.me, &sources.roles).await?;
+    rebuild(ctx, url, client, state, sources, calendar, lockdown).await
+}
+
+/// Lockdown, when this person may change it; `None` from servers without it.
+async fn lockdown(
+    client: &KeyClient<'_>,
+    me: &Value,
+    roles: &Value,
+) -> Result<Option<crate::server::Lockdown>> {
+    if !holds(me, roles, "lock_down") {
+        return Ok(None);
+    }
+    let reply = client
+        .request(Method::GET, "/v1/settings/lockdown")
+        .send()
+        .await?;
+    if reply.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    Ok(Some(reply.error_for_status()?.json().await?))
 }
 
 /// Refetch only what a `channel_changed` notice says changed, then rebuild the directory.
@@ -239,6 +259,7 @@ pub(super) async fn reload(
         return directory(ctx, url, client, state).await;
     };
     let mut calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
+    let mut lockdown_now = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
     match part {
         Part::Channels => {
             sources.catalog = client.catalog().await?;
@@ -250,9 +271,10 @@ pub(super) async fn reload(
         Part::Space => sources.space = get(client, "/v1/space").await?,
         Part::Emoji => sources.emoji = emoji_list(client).await?,
         Part::Calendar => calendar = super::calendar::load(client).await?,
+        Part::Lockdown => lockdown_now = lockdown(client, &sources.me, &sources.roles).await?,
         Part::Other => return directory(ctx, url, client, state).await,
     }
-    rebuild(ctx, url, client, state, sources, calendar).await
+    rebuild(ctx, url, client, state, sources, calendar, lockdown_now).await
 }
 
 /// Apply one member's new profile from a `member_changed` notice, fetching at most their
@@ -279,7 +301,8 @@ pub(super) async fn profile(
         sources.me = get(client, "/v1/me").await?;
     }
     let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
-    rebuild(ctx, url, client, state, sources, calendar).await
+    let lockdown = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
+    rebuild(ctx, url, client, state, sources, calendar, lockdown).await
 }
 
 /// Write a profile into the member's row (and the own `/v1/me` reply), as a fresh
@@ -350,11 +373,16 @@ fn discard_unreadable(ctx: &Ctx, url: &Url, state: &mut State, catalog: &Catalog
 
 /// Whether this member's roles grant `manage_channels`, as the directory's permissions read.
 fn manages_channels(me: &Value, roles: &Value) -> bool {
+    holds(me, roles, "manage_channels")
+}
+
+/// Whether one of this person's roles grants `permission`.
+fn holds(me: &Value, roles: &Value, permission: &str) -> bool {
     let mine = me["role_ids"].as_array();
     (roles["roles"].as_array().into_iter().flatten()).any(|role| {
         mine.is_some_and(|mine| mine.contains(&role["id"]))
             && (role["permissions"].as_array())
-                .is_some_and(|flags| flags.contains(&json!("manage_channels")))
+                .is_some_and(|flags| flags.contains(&json!(permission)))
     })
 }
 
@@ -366,6 +394,7 @@ async fn rebuild(
     state: &mut State,
     sources: Sources,
     calendar: Option<Calendar>,
+    lockdown: Option<crate::server::Lockdown>,
 ) -> Result<()> {
     let Sources {
         catalog,
@@ -415,6 +444,7 @@ async fn rebuild(
         kept
     });
     dir.calendar = calendar;
+    dir.lockdown = lockdown;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     state.pictures_pending = true;
@@ -567,6 +597,8 @@ fn build(
                     "manage_events" => perms.manage_events = true,
                     "start_focus" => perms.start_focus = true,
                     "bypass_slow_mode" => perms.bypass_slow_mode = true,
+                    "lock_down" => perms.lock_down = true,
+                    "remove_recent_messages" => perms.remove_recent_messages = true,
                     _ => {}
                 }
             }
@@ -811,6 +843,7 @@ fn build(
         packs,
         packs_max: limit("max_packs"),
         calendar: None,
+        lockdown: None,
     })
 }
 
@@ -989,7 +1022,8 @@ pub(super) async fn fill_pictures(
         return Ok(());
     };
     let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
-    rebuild(ctx, url, client, state, sources, calendar).await?;
+    let lockdown = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
+    rebuild(ctx, url, client, state, sources, calendar, lockdown).await?;
     state.pictures_pending = false;
     Ok(())
 }

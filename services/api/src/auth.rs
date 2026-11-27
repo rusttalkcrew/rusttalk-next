@@ -165,14 +165,18 @@ async fn sign_in_device(
         .bind(person)
         .fetch_one(&mut *tx)
         .await?;
+    let mut locked = false;
     if !member {
-        if let Some(invite) = request.invite.as_deref() {
-            redeem(&mut tx, person, invite, at).await?;
-        } else if open_join {
-            admit_open(&mut tx, person, &ip, at).await?;
-        } else {
+        if request.invite.is_none() && !open_join {
             return Err(ApiError::forbidden("invite_required"));
         }
+        crate::lockdown::check(app, &mut tx).await?;
+        if let Some(invite) = request.invite.as_deref() {
+            redeem(&mut tx, person, invite, at).await?;
+        } else {
+            admit_open(&mut tx, person, &ip, at).await?;
+        }
+        locked = crate::lockdown::joined(app, &mut tx, person, at).await?;
     }
 
     keys::init_space(&mut tx, &server_id).await?;
@@ -192,6 +196,9 @@ async fn sign_in_device(
     let session = issue_session(&mut tx, person, device, &ip, at, app.session_ttl).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
+    if locked {
+        crate::lockdown::auto_locked(app);
+    }
     if added || !member {
         keys::changed(app, person, Some(device));
     } else {

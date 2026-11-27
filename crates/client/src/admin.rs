@@ -5,10 +5,12 @@ mod emoji;
 mod file_limits;
 
 mod history;
-mod rate_limits;
 mod new_members;
+mod rate_limits;
 
 mod import;
+
+mod lockdown;
 
 mod members;
 
@@ -81,10 +83,16 @@ pub enum Tab {
     Emoji,
     /// Server stickers.
     Stickers,
+    /// Stop new people joining.
+    Lockdown,
 }
 
 enum MemberAction {
-    Ban { network: bool },
+    /// `remove`: also remove what they posted in this many seconds before, 0 for nothing.
+    Ban {
+        network: bool,
+        remove: i64,
+    },
     Roles(Vec<String>),
 }
 
@@ -107,6 +115,7 @@ pub struct Settings {
     history: Option<history::Form>,
     rate_limits: Option<rate_limits::Form>,
     new_members: Option<new_members::Form>,
+    lockdown: Option<lockdown::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -262,6 +271,7 @@ impl Settings {
             || self.history.as_ref().is_some_and(history::Form::unsaved)
             || (self.rate_limits.as_ref()).is_some_and(rate_limits::Form::unsaved)
             || (self.new_members.as_ref()).is_some_and(new_members::Form::unsaved)
+            || self.lockdown.as_ref().is_some_and(lockdown::Form::unsaved)
             || self.joining_unsaved()
             || self.listing_unsaved()
             || self.emoji.unsaved()
@@ -335,6 +345,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
             Tab::Joining
         } else if perms.invite {
             Tab::Invites
+        } else if perms.lock_down {
+            Tab::Lockdown
         } else {
             Tab::Files
         };
@@ -382,6 +394,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         history: None,
         rate_limits: None,
         new_members: None,
+        lockdown: None,
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -400,6 +413,44 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         import: None,
         message: None,
     });
+}
+
+/// While the server is locked down, tell the people who may lift it, with a button.
+pub fn lockdown_banner(ui: &mut Ui, home: &mut Home, index: usize) {
+    let server = &home.servers[index];
+    let Some(lockdown) = (server.dir.lockdown.as_ref()).filter(|lockdown| lockdown.locked) else {
+        return;
+    };
+    if !server.dir.perms.lock_down || server.dir.perms.preview {
+        return;
+    }
+    let text = match lockdown.automatic {
+        true => t!("lockdown.banner_automatic"),
+        false => t!("lockdown.banner"),
+    };
+    let online = server.status == crate::server::Status::Online;
+    let (lift, open_page) = ui::card(ui, |ui| {
+        ui.add(egui::Label::new(ui::bold(text)).wrap());
+        ui.horizontal_wrapped(|ui| {
+            let lift = ui
+                .add_enabled_ui(online, |ui| ui::primary(ui, t!("lockdown.lift")))
+                .inner
+                .clicked();
+            (lift, ui::secondary(ui, t!("lockdown.settings")).clicked())
+        })
+        .inner
+    });
+    ui.add_space(ui::SPACE_S);
+    if lift {
+        let lifted = crate::server::Lockdown {
+            locked: false,
+            ..lockdown.clone()
+        };
+        server.send(Command::Admin(Admin::SaveLockdown(lifted)));
+    }
+    if open_page {
+        open(home, index, Tab::Lockdown);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -544,7 +595,10 @@ fn action(server: &Server, person: &Id, choice: Moderate) -> MemberAction {
         Moderate::Kick | Moderate::Timeout | Moderate::EndTimeout => {
             unreachable!("handled in `moderate`")
         }
-        Moderate::Ban => MemberAction::Ban { network: false },
+        Moderate::Ban => MemberAction::Ban {
+            network: false,
+            remove: 0,
+        },
     }
 }
 
@@ -618,6 +672,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         "🌱",
                         t!("admin.new_members"),
                         perms.manage_server,
+                    ),
+                    page(
+                        Tab::Lockdown,
+                        "🔒",
+                        t!("lockdown.title"),
+                        perms.lock_down && server.dir.lockdown.is_some(),
                     ),
                     page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit),
                 ],
@@ -698,6 +758,18 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         }
                     }
                     Tab::Listing => listing_tab(ui, server, settings),
+                    Tab::Lockdown => match &server.dir.lockdown {
+                        Some(saved) => {
+                            let form = (settings.lockdown)
+                                .get_or_insert_with(|| lockdown::Form::new(saved.clone()));
+                            form.sync(saved);
+                            form.show(ui).map(Admin::SaveLockdown)
+                        }
+                        None => {
+                            loading(ui, settings);
+                            None
+                        }
+                    },
                     Tab::Emoji | Tab::Stickers => {
                         let sticker = before == Tab::Stickers;
                         let picker = crate::files::PICKER;
@@ -1040,15 +1112,19 @@ fn members_tab<'a>(
         let mut cancel = false;
         ui::card(ui, |ui| {
             match action {
-                MemberAction::Ban { network } => {
+                MemberAction::Ban { network, remove } => {
                     ui.label(ui::bold(t!("admin.ban_title", name = name)));
                     ui.label(t!("admin.ban_help"));
                     ui::checkbox(ui, network, t!("admin.ban_network"));
                     ui.weak(t!("admin.ban_network_help"));
                     ui::checkbox(ui, &mut settings.also_block, t!("admin.ban_also_block"));
+                    if perms.remove_recent_messages {
+                        remove_choice(ui, remove);
+                    }
                     ui.horizontal(|ui| {
                         if danger(ui, t!("admin.ban")).clicked() {
-                            request = Some(Admin::Ban(person, *network));
+                            let remove = (*remove > 0).then_some(*remove);
+                            request = Some(Admin::Ban(person, *network, remove));
                             settings.block_after_ban = settings.also_block.then_some(person);
                         }
                         cancel = ui::secondary(ui, t!("common.cancel")).clicked();
@@ -1290,6 +1366,18 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "new_member_rules_changed" => t!("audit.new_member_rules_changed", actor = actor),
         "listing_changed" if entry.details["enabled"] == true => t!("audit.listed", actor = actor),
         "listing_changed" => t!("audit.unlisted", actor = actor),
+        "lockdown_started" => t!("audit.lockdown_started", actor = actor),
+        "lockdown_ended" => t!("audit.lockdown_ended", actor = actor),
+        "lockdown_message_changed" => t!("audit.lockdown_message_changed", actor = actor),
+        "auto_lockdown_changed" => t!("audit.auto_lockdown_changed", actor = actor),
+        "lockdown_auto_started" => t!("audit.lockdown_auto_started").into(),
+        "recent_messages_removed" => {
+            t!(
+                "audit.recent_messages_removed",
+                actor = actor,
+                target = target
+            )
+        }
         "ownership_transferred" => t!(
             "audit.ownership_transferred",
             actor = actor,
@@ -1423,9 +1511,29 @@ fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
             let label = new_members::label;
             vec![format!("{} → {}", label(before), label(after))]
         }
+        "auto_lockdown_changed" => {
+            let spike = |key: &str| spike(&details[key]);
+            vec![format!("{} → {}", spike("before")?, spike("after")?)]
+        }
+        "lockdown_auto_started" => vec![spike(details)?],
+        "recent_messages_removed" => vec![t!(
+            "audit.removed_counts",
+            messages = details["messages"].as_u64()?,
+            files = details["files"].as_u64()?
+        )],
         _ => Vec::new(),
     };
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Automatic lockdown's `{joins, secs}` in words: "10 joins in 2 min", or "Off".
+fn spike(value: &serde_json::Value) -> Option<String> {
+    let joins = value["joins"].as_u64()?;
+    let minutes = value["secs"].as_u64()? / 60;
+    Some(match joins {
+        0 => t!("lockdown.auto_off").into(),
+        _ => t!("lockdown.spike", joins = joins, minutes = minutes),
+    })
 }
 
 /// "+ added, − removed".
@@ -1443,6 +1551,30 @@ fn role_name(server: &Server, id: &str) -> String {
         .iter()
         .find(|role| role.id == id && role.name_known)
         .map_or_else(|| t!("audit.unknown_role").into(), |role| role.name.clone())
+}
+
+/// "Remove their messages from the last": nothing, an hour, a day or a week, in seconds.
+fn remove_choice(ui: &mut Ui, remove: &mut i64) {
+    let choices = [
+        (0, t!("admin.ban_remove_none")),
+        (3_600, t!("admin.ban_remove_hour")),
+        (86_400, t!("admin.ban_remove_day")),
+        (604_800, t!("admin.ban_remove_week")),
+    ];
+    let shown = (choices.iter())
+        .find(|(secs, _)| secs == remove)
+        .map_or(choices[0].1, |(_, label)| label);
+    let label = ui.label(t!("admin.ban_remove"));
+    ComboBox::from_id_salt("ban-remove-recent")
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (secs, label) in choices {
+                ui.selectable_value(remove, secs, label);
+            }
+        })
+        .response
+        .labelled_by(label.id);
+    ui.weak(t!("admin.ban_remove_help"));
 }
 
 fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
