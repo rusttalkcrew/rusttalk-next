@@ -7,7 +7,7 @@ No telemetry, analytics, crash reporting or tracking.
 The API stores its Ed25519 signing seed in `server.key` and the following
 tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` suffix denotes encrypted binary data.
 Sign-in challenges (32 random bytes, the IPv4 address or IPv6 /64 that fetched them, and
-their expiry) are kept only in memory for at most 60 seconds. For automatic lockdown the API keeps the times of the latest joins (no identities) in memory.
+their expiry) are kept only in memory for at most 60 seconds. For automatic lockdown the API keeps the times of the latest joins (no identities) in memory. For server statistics (`GET /v1/stats`) it keeps only totals in memory since its start: bytes in and out, sign-ins, sent messages and the most people connected at once with the time; no identities, addresses or content, and nothing is stored.
 
 | Table | Columns |
 | --- | --- |

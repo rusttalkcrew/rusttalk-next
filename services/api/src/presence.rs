@@ -156,6 +156,16 @@ fn announce(app: &App, person_id: &str, member: &mut Member, idle: &HashSet<Stri
 }
 
 impl Sessions {
+    /// People with at least one open event socket.
+    pub fn connected(&self) -> usize {
+        let state = self.0.lock().expect("presence sessions");
+        state
+            .members
+            .values()
+            .filter(|member| !member.devices.is_empty())
+            .count()
+    }
+
     pub fn snapshot(&self) -> HashMap<String, Presence> {
         self.0
             .lock()
@@ -217,6 +227,9 @@ pub fn open(app: &App, person_id: String, device: String, status: Status) -> Soc
         });
     *member.devices.entry(device.clone()).or_default() += 1;
     member.closes_at = None;
+    let connected = (state.members.values()).filter(|member| !member.devices.is_empty());
+    app.stats.connected(connected.count() as u64);
+    let member = state.members.get_mut(&person_id).expect("just added");
     if fresh {
         member.announced = visible(member, &state.idle);
         if member.announced != Presence::Offline {

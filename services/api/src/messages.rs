@@ -240,6 +240,7 @@ pub async fn create(
         size,
         envelope,
     };
+    app.stats.message_sent();
     app.notify(crate::events::message_created(channel, id, &record));
     Ok((StatusCode::CREATED, Json(record)))
 }

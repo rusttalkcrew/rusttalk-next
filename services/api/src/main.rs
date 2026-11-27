@@ -19,6 +19,7 @@ mod page_files;
 mod presence;
 mod roles;
 mod slow_mode;
+mod stats;
 mod store;
 mod sync;
 mod takedown;
@@ -86,6 +87,7 @@ struct App {
     limits: Arc<limits::Limits>,
     session_ttl: i64,
     dm_starts: Arc<dms::Starts>,
+    stats: Arc<stats::Stats>,
 }
 
 /// Events a socket may fall behind before it must resync. A slot frees once every socket has
@@ -294,6 +296,7 @@ async fn run() -> Result<()> {
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
                 session_ttl: auth::session_ttl()?,
                 dm_starts: Arc::new(dms::Starts::from_env()?),
+                stats: Arc::new(stats::Stats::new(&dir)),
             })
             .await?;
         }
@@ -325,6 +328,7 @@ async fn serve(app: App) -> io::Result<()> {
     if let Err(error) = timeouts::resume(&app).await {
         tracing::error!(reason = error.code, "scheduling timeout ends failed");
     }
+    let sampler = tokio::spawn(stats::sample(app.stats.clone()));
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     // A host that lowered RUSTTALK_MESSAGE_RETAIN gets its channels trimmed now.
@@ -334,6 +338,7 @@ async fn serve(app: App) -> io::Result<()> {
             tracing::error!(reason = error.code, "trimming message history failed");
         }
     });
+    let stats = app.stats.clone();
     let app = routes(app)
         .layer(middleware::from_fn(finish_changes))
         .layer(middleware::from_fn(log_request))
@@ -344,10 +349,14 @@ async fn serve(app: App) -> io::Result<()> {
             request
         }));
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = stats::Counted {
+        listener: TcpListener::bind("0.0.0.0:8080").await?,
+        stats,
+    };
     tracing::info!("API listening on port 8080");
     let result = axum::serve(listener, app).await;
     expiry.abort();
+    sampler.abort();
     publisher.abort();
     file_expiry.abort();
     result
@@ -477,6 +486,7 @@ fn routes(app: App) -> Router {
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/bans", get(members::bans))
         .route("/v1/audit", get(members::audit_log))
+        .route("/v1/stats", get(stats::show))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .route("/v1/emoji", get(emoji::list))
         .route("/v1/emoji/packs", post(emoji::add_pack))

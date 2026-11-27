@@ -604,6 +604,7 @@ fn build(
                     "bypass_slow_mode" => perms.bypass_slow_mode = true,
                     "lock_down" => perms.lock_down = true,
                     "remove_recent_messages" => perms.remove_recent_messages = true,
+                    "view_server_stats" => perms.stats = true,
                     _ => {}
                 }
             }

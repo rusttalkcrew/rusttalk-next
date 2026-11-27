@@ -164,6 +164,56 @@ pub struct RateLimits {
     pub ceiling: Option<RateLimitPreset>,
 }
 
+/// Server statistics (`GET /v1/stats`): counts and sizes only, never content, names or
+/// addresses.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerStats {
+    pub version: String,
+    pub started_at: i64,
+    pub uptime_secs: u64,
+    /// People with the app open now.
+    pub connected: u64,
+    pub peak: StatsPeak,
+    pub members: i64,
+    /// Sign-ins since start.
+    pub logins: u64,
+    /// Messages sent since start.
+    pub messages: u64,
+    pub traffic: StatsTraffic,
+    pub storage: StatsStorage,
+    /// Resident memory of the API, where the system tells it (Linux).
+    pub memory: Option<u64>,
+}
+
+/// Most people connected at once since start, and when.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsPeak {
+    pub count: u64,
+    pub at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsTraffic {
+    /// The API's own connections: sign-in, chat, files and live updates.
+    pub control: StatsDirection,
+}
+
+/// Bytes since start and per second just now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsDirection {
+    pub received: u64,
+    pub sent: u64,
+    pub received_per_sec: u64,
+    pub sent_per_sec: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsStorage {
+    /// The database with its write-ahead log.
+    pub database: u64,
+    pub files: u64,
+}
+
 /// New member rules (`/v1/settings/new-member-rules`): for `secs` after joining, members
 /// with only the default role can't upload files, start DMs, mention everyone or roles, or
 /// create invites. 0 is off.

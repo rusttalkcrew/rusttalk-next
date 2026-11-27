@@ -998,6 +998,7 @@ mod tests {
             voice: None,
             session_ttl: crate::auth::SESSION_TTL,
             dm_starts: Default::default(),
+            stats: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };
