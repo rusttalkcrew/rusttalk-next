@@ -1503,6 +1503,7 @@ sounds.muted = 自分でマイクをミュートにしたとき
 sounds.unmuted = 自分でマイクのミュートを解除したとき
 sounds.ring = 自分や他の人がボイスに呼ばれたとき
 sounds.message = DMやメンションが届いたとき
+sounds.poked = 誰かにつつかれたとき
 voice_request.ask = ボイスに呼ぶ
 voice_request.asks_you = {name} がボイスに呼んでいます
 voice_request.join = 今すぐ参加

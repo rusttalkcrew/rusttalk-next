@@ -897,7 +897,7 @@ impl Audio {
         }
         mixer.cues.extend(sound);
         // A ring is longer, and these two may first have to open the speakers.
-        let secs = if matches!(cue, Cue::Ring | Cue::Message) {
+        let secs = if matches!(cue, Cue::Ring | Cue::Message | Cue::Poked) {
             2.0
         } else {
             1.0
@@ -916,7 +916,16 @@ impl Audio {
 
     /// Chime for a new message, also outside a call. False when the sound settings keep it quiet.
     pub fn message(&self) -> bool {
-        let played = self.play_cue(Cue::Message);
+        self.alert(Cue::Message)
+    }
+
+    /// Chime for a poke, also outside a call. False when the sound settings keep it quiet.
+    pub fn poke(&self) -> bool {
+        self.alert(Cue::Poked)
+    }
+
+    fn alert(&self, cue: Cue) -> bool {
+        let played = self.play_cue(cue);
         self.refresh();
         played
     }

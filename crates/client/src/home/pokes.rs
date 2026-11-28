@@ -122,6 +122,8 @@ impl Home {
             dm: true,
             mention: Mention::Me,
         };
+        // Our own sound is heard even when the system keeps its notifications quiet.
+        let chimed = !self.dnd() && prefs.sound && self.voice.audio.poke();
         if !self.dnd() && notify::should_notify(prefs, rule, arrival, self.focused, false) {
             let body = match text.trim() {
                 "" => t!("pokes.no_note"),
@@ -129,7 +131,11 @@ impl Home {
             };
             let title = t!("pokes.poked_you", name = name);
             let target = (server.address.clone(), channel);
-            self.notify.show(ctx, &title, body, target);
+            if chimed {
+                self.notify.show_silent(ctx, &title, body, target);
+            } else {
+                self.notify.show(ctx, &title, body, target);
+            }
         }
         self.popup = Some(Popup {
             person: peer,

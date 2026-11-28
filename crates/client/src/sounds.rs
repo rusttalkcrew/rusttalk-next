@@ -42,10 +42,12 @@ pub enum Cue {
     Unmuted,
     Ring,
     Message,
+    /// Someone pokes this person, also outside a call.
+    Poked,
 }
 
 impl Cue {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::YouJoined,
         Self::YouLeft,
         Self::ChannelChanged,
@@ -69,6 +71,7 @@ impl Cue {
         Self::Unmuted,
         Self::Ring,
         Self::Message,
+        Self::Poked,
     ];
 
     pub fn label(self) -> &'static str {
@@ -96,6 +99,7 @@ impl Cue {
             Self::Unmuted => t!("sounds.unmuted"),
             Self::Ring => t!("sounds.ring"),
             Self::Message => t!("sounds.message"),
+            Self::Poked => t!("sounds.poked"),
         }
     }
 
@@ -137,6 +141,8 @@ impl Cue {
             ],
             // Higher than the call chimes, so a message is not mistaken for one.
             Self::Message => &[1046.5, 1318.51],
+            // High, down and back up, like a tap on the shoulder.
+            Self::Poked => &[1318.51, 1046.5, 1318.51],
         };
         let volume = volume.clamp(0.0, 1.0);
         notes.iter().flat_map(move |&hz| {
@@ -188,6 +194,7 @@ macro_rules! every_line {
             Unmuted => "unmuted",
             Ring => "ring",
             Message => "message",
+            Poked => "poked",
         )
     };
 }

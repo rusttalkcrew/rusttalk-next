@@ -1507,6 +1507,7 @@ sounds.muted = You mute yourself
 sounds.unmuted = You unmute yourself
 sounds.ring = Someone asks you, or someone else, to join voice
 sounds.message = A direct message or mention arrives
+sounds.poked = Someone pokes you
 voice_request.ask = Ask to join voice
 voice_request.asks_you = {name} asks you to join
 voice_request.join = Join now

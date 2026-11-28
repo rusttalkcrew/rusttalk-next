@@ -1503,6 +1503,7 @@ sounds.muted = Je zet je microfoon uit
 sounds.unmuted = Je zet je microfoon aan
 sounds.ring = Iemand roept jou of een ander naar een spraakkanaal
 sounds.message = Er komt een privébericht of vermelding binnen
+sounds.poked = Iemand port je
 voice_request.ask = Naar spraakkanaal roepen
 voice_request.asks_you = {name} vraagt of je erbij komt
 voice_request.join = Nu deelnemen

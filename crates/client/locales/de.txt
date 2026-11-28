@@ -1503,6 +1503,7 @@ sounds.muted = Du schaltest dein Mikrofon stumm
 sounds.unmuted = Du schaltest dein Mikrofon ein
 sounds.ring = Jemand ruft dich oder andere in einen Sprachkanal
 sounds.message = Eine Direktnachricht oder Erwähnung kommt an
+sounds.poked = Jemand stupst dich an
 voice_request.ask = In Sprachkanal rufen
 voice_request.asks_you = {name} ruft dich in den Sprachkanal
 voice_request.join = Jetzt beitreten
