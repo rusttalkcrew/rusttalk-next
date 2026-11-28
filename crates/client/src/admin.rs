@@ -8,6 +8,7 @@ mod history;
 mod new_members;
 mod rate_limits;
 pub(crate) mod reports;
+mod stats;
 
 mod import;
 
@@ -95,6 +96,8 @@ pub enum Tab {
     Takedowns,
     /// Reported messages to review.
     Reports,
+    /// Server statistics: counts and sizes, refreshed while open.
+    Stats,
 }
 
 enum MemberAction {
@@ -126,6 +129,7 @@ pub struct Settings {
     rate_limits: Option<rate_limits::Form>,
     new_members: Option<new_members::Form>,
     lockdown: Option<lockdown::Form>,
+    stats: stats::View,
     /// Newest first; `None` until loaded (owner).
     takedowns: Option<Vec<Takedown>>,
     takedown: takedown::Form,
@@ -190,6 +194,7 @@ impl Settings {
                 self.audit_error = None;
             }
             AdminUpdate::AuditFailed(text) => self.audit_error = Some(text),
+            AdminUpdate::Stats(update) => self.stats.apply(update),
             AdminUpdate::Invites(invites) => (self.invites, self.invites_loaded) = (invites, true),
             AdminUpdate::Joining(open, cap) => {
                 if !self.joining_unsaved() {
@@ -427,6 +432,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         rate_limits: None,
         new_members: None,
         lockdown: None,
+        stats: stats::View::default(),
         takedowns: None,
         takedown: takedown::Form::default(),
         reports: None,
@@ -686,6 +692,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     page(Tab::Emoji, "😀", t!("admin.emoji"), perms.manage_emoji),
                     page(Tab::Stickers, "🏷", t!("admin.stickers"), perms.manage_emoji),
                     page(Tab::Listing, "🌐", t!("admin.public_listing"), perms.owner),
+                    page(Tab::Stats, "📊", t!("admin.stats"), perms.stats),
                 ],
             ),
             group(
@@ -816,6 +823,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             }
                         }
                     },
+                    Tab::Stats => settings.stats.show(ui),
                     Tab::Lockdown => match &server.dir.lockdown {
                         Some(saved) => {
                             let form = (settings.lockdown)

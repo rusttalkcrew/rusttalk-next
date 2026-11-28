@@ -5,7 +5,7 @@ use reqwest::Method;
 use rusttalk_core::{
     auth::{
         FileLimits, FileSettings, MessageHistory, NewMemberRules, RateLimitPreset, RateLimits,
-        ServerUpdates, decode, encode,
+        ServerStats, ServerUpdates, decode, encode,
     },
     client::KeyClient,
     keys::{Metadata, random_key},
@@ -83,6 +83,8 @@ pub enum Admin {
     SaveHistory(i64),
     LoadRateLimits,
     SaveRateLimits(RateLimitPreset),
+    /// The server statistics, as they are now.
+    LoadStats,
     LoadNewMembers,
     /// How long the new member rules last after joining, in seconds; 0 is off.
     SaveNewMembers(i64),
@@ -267,6 +269,8 @@ pub enum AdminUpdate {
     RateLimits(Option<RateLimits>),
     /// `None` from a server too old to have new member rules.
     NewMembers(Option<NewMemberRules>),
+    /// The server statistics, or why they could not be loaded.
+    Stats(Result<ServerStats, String>),
     /// Whether the server is listed, the saved details, and whether the directory
     /// removed it.
     Listing(bool, Option<PublicListing>, Option<Delisted>),
@@ -491,6 +495,16 @@ async fn change(
                         == Some(reqwest::StatusCode::NOT_FOUND) => {}
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
+            return None;
+        }
+        Admin::LoadStats => {
+            let stats = get(client, "/v1/stats")
+                .await
+                .map_err(|error| failed(&error));
+            let stats = stats.and_then(|value| {
+                serde_json::from_value(value).map_err(|_| t!("admin.stats_unavailable").to_owned())
+            });
+            send(AdminUpdate::Stats(stats));
             return None;
         }
         Admin::LoadTakedowns => {

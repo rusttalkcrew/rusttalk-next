@@ -23,9 +23,11 @@ use crate::{ApiError, ApiResult};
 /// do not queue behind a few connections. Writes still take turns through `WRITER`.
 const MAX_CONNECTIONS: u32 = 16;
 
+pub const DATABASE: &str = "rusttalk.sqlite3";
+
 pub async fn open(dir: &Path) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
-        .filename(dir.join("rusttalk.sqlite3"))
+        .filename(dir.join(DATABASE))
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
@@ -629,7 +631,7 @@ mod tests {
     /// connection still holds the write lock fails at once instead of waiting.
     async fn impatient(dir: &std::path::Path) -> anyhow::Result<SqlitePool> {
         let options = SqliteConnectOptions::new()
-            .filename(dir.join("rusttalk.sqlite3"))
+            .filename(dir.join(DATABASE))
             .busy_timeout(Duration::ZERO);
         Ok(SqlitePoolOptions::new().connect_with(options).await?)
     }

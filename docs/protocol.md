@@ -157,6 +157,7 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 | GET `/v1/settings/new-member-rules` | Empty | Any member. 200, `{secs}` |
 | PUT `/v1/settings/new-member-rules` | `{secs}` | `manage_server`. 200, the saved `{secs}`. A change is audited as `new_member_rules_changed` with `{before, after}` and sends `channel_changed` |
 | GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before`. `action=report_resolved` also matches `dm_report_resolved`, `reports_dismissed` and `dm_reports_dismissed` |
+| GET `/v1/stats` | Empty | `view_server_stats`. 200, `{version, started_at, uptime_secs, connected, peak: {count, at}, members, logins, messages, traffic: {control: {received, sent, received_per_sec, sent_per_sec}}, storage: {database, files}, memory}`. Counts and sizes only, kept in memory and reset on restart: `connected` is people with an open event socket and `peak` the most at once; `logins` and `messages` count sign-ins and sent messages; `traffic.control` counts the bytes on the API's own connections (sign-in, chat, files, live updates), per second over the last 2 s; `storage.database` is the database with its write-ahead log and `storage.files` the stored uploads; `memory` is the API's resident memory, `null` where the system doesn't tell it. Older servers answer 404 |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
 field must be a positive integer, or PUT returns `400 invalid_file_limits`.
@@ -202,7 +203,7 @@ doesn’t send them while `new_member_until` is set. Older servers answer 404.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all twenty-two flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all twenty-three flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
 `create_events`, `manage_events`, `start_focus`, `bypass_slow_mode`, `timeout_members`,
 `lock_down`, `remove_recent_messages` and `review_reports`. Upgrading also gives `bypass_slow_mode` to
@@ -211,7 +212,7 @@ custom roles that have `delete_messages`, `timeout_members` to custom roles that
 roles with `ban` and `delete_messages`. Member (0) has `suggest_events`
 and `start_focus` and starts as the default. Every new role gets `start_focus`
 when its creator has it. The other flags are `invite`, `manage_roles`,
-`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`,
+`view_audit_log`, `view_server_stats`, `manage_channels`, `manage_server`, `mention_everyone`,
 `manage_emoji` and `skip_new_member_rules`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes

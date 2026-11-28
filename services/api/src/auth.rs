@@ -204,6 +204,7 @@ async fn sign_in_device(
     } else {
         app.signal(Change::Session(*cert.person_id()));
     }
+    app.stats.signed_in();
     Ok(Json(session))
 }
 

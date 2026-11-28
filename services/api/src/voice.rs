@@ -853,6 +853,7 @@ mod tests {
             })),
             session_ttl: 3600,
             dm_starts: Default::default(),
+            stats: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
             joins: Default::default(),
         };

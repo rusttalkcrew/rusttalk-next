@@ -8551,6 +8551,7 @@ mod tests {
     mod reports;
     mod sensitive;
     mod server_emoji;
+    mod server_stats;
     mod settings_close;
     mod slow_mode;
     mod sticker_picker;

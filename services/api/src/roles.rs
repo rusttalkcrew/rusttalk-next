@@ -55,9 +55,11 @@ pub enum Permission {
     RemoveRecentMessages = 1048576,
     /// Read and act on reports of messages outside DMs (DM reports go to the owner).
     ReviewReports = 2097152,
+    /// See the server's statistics: counts and sizes, never content.
+    ViewServerStats = 4194304,
 }
 
-const PERMISSIONS: [Permission; 22] = [
+const PERMISSIONS: [Permission; 23] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -80,6 +82,7 @@ const PERMISSIONS: [Permission; 22] = [
     Permission::LockDown,
     Permission::RemoveRecentMessages,
     Permission::ReviewReports,
+    Permission::ViewServerStats,
 ];
 
 #[derive(FromRow)]

@@ -675,6 +675,7 @@ fn build(
                     "lock_down" => perms.lock_down = true,
                     "remove_recent_messages" => perms.remove_recent_messages = true,
                     "review_reports" => perms.review_reports = true,
+                    "view_server_stats" => perms.stats = true,
                     _ => {}
                 }
             }

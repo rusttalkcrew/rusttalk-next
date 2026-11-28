@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server settings > Statistics shows owners and admins who is connected, sign-ins, messages, traffic, storage, uptime and memory, refreshed every 2 seconds. Only counts and sizes, no content.
+
 ## v0.12.0 - 2026-11-28
 
 - On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.

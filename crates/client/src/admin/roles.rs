@@ -850,6 +850,14 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
         knows("skip_new_member_rules"),
         knows("lock_down"),
     );
+    if knows("view_server_stats") {
+        groups[2].1.push((
+            "view_server_stats",
+            t!("perm.view_server_stats"),
+            t!("perm.view_server_stats_help"),
+            false,
+        ));
+    }
     // Likewise for timeouts, which older servers refuse.
     if knows("timeout_members") {
         groups[2].1.push((
