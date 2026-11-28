@@ -91,6 +91,8 @@ pub struct Voice {
     share_screen: Option<(Options, Option<usize>)>,
     /// The dialog switches the screen being shared, keeping its quality, rather than starting one.
     changing_screen: bool,
+    /// What our screen share shows and how, to start it again with other options.
+    pub(crate) shared_screen: Option<(Target, Options)>,
     /// Screens and windows to pick from (Windows), filled by a listing thread.
     targets: Arc<Mutex<Listing<Target>>>,
     pub watching: Option<Watching>,
@@ -272,6 +274,7 @@ impl Voice {
             sharing: Sharing::Off,
             share_screen: None,
             changing_screen: false,
+            shared_screen: None,
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
             preview: None,
@@ -326,10 +329,19 @@ impl Voice {
         self.sharing = Sharing::Off;
         self.share_screen = None;
         self.changing_screen = false;
+        self.shared_screen = None;
         self.watching = None;
         self.stop_preview();
         self.camera.reset();
         self.cameras.clear();
+    }
+
+    /// The running share's quality, frame rate and cursor, else the last choices.
+    pub(crate) fn screen_options(&self) -> Options {
+        match &self.shared_screen {
+            Some((_, options)) => *options,
+            None => screen_options(&self.audio.settings()),
+        }
     }
 
     pub(crate) fn default_stream_audio(&self) -> Vec<App> {
@@ -1285,6 +1297,50 @@ fn remember_screen_options(s: &mut Settings, options: Options) {
     s.screen_cursor = options.cursor;
 }
 
+/// Note a share starting (`started`) or switching to `target`; a switch keeps the
+/// quality, frame rate and cursor.
+pub(crate) fn note_shared_screen(
+    voice: &mut Voice,
+    target: &Target,
+    options: Options,
+    started: bool,
+) {
+    match &mut voice.shared_screen {
+        Some((shown, kept)) if !started => {
+            *shown = target.clone();
+            kept.remote_control = options.remote_control;
+        }
+        _ => voice.shared_screen = Some((target.clone(), options)),
+    }
+}
+
+/// Share the same screen again with another quality, frame rate or cursor. A published
+/// track keeps the size and frame rate it started with, so the share stops and starts
+/// again: people watching see it back after a moment. Linux asks for the screen again.
+pub(crate) fn restart_screen(voice: &mut Voice, server: &Server, options: Options) {
+    let Some((target, old)) = voice.shared_screen.clone() else {
+        return;
+    };
+    let options = Options {
+        remote_control: old.remote_control,
+        ..options
+    };
+    if voice.sharing != Sharing::On || options == old {
+        return;
+    }
+    let mut settings = voice.audio.settings();
+    remember_screen_options(&mut settings, options);
+    voice.audio.set_settings(settings);
+    voice.shared_screen = Some((target.clone(), options));
+    server.send(Command::StopScreen);
+    server.send(Command::ShareScreen(
+        target,
+        options,
+        voice.stream_audio.clone(),
+    ));
+    voice.sharing = Sharing::Starting;
+}
+
 /// Switch the screen being shared. Closing the picker keeps the current share.
 fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
     if voice.sharing != Sharing::On {
@@ -1295,6 +1351,8 @@ fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
             .ok()
             .and_then(|found| found.into_iter().find(|t| t.kind == Kind::Portal));
         if let Some(portal) = portal {
+            let options = voice.screen_options();
+            note_shared_screen(voice, &portal, options, false);
             voice.sharing = Sharing::Changing;
             server.send(Command::ChangeScreen(portal, false));
         }
@@ -1466,6 +1524,7 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     });
     if let Some(target) = share {
         let options = *options;
+        note_shared_screen(&mut home.voice, &target, options, !changing);
         if changing {
             if let Some(server) = call_server(home) {
                 server.send(Command::ChangeScreen(target, options.remote_control));

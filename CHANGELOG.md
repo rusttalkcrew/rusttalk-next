@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Call button menus open right above their button, the screen share menu changes quality, frame rate and sound while you share, and a right-click on the gear jumps to any Settings page.
+
 ## v0.12.0 - 2026-11-28
 
 - On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.

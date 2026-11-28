@@ -426,9 +426,30 @@ pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opt
     show(popup, MENU_WIDE, add)
 }
 
+/// A menu that opens right above `anchor` when it is clicked, lined up with its left
+/// edge, or wherever it fits better. `wide` for rows with a line of help.
+pub fn menu_up<R>(anchor: &Response, wide: bool, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let width = if wide { MENU_WIDE } else { MENU_WIDTH };
+    show(
+        Popup::menu(anchor).gap(4.0).align(RectAlign::TOP_START),
+        width,
+        add,
+    )
+}
+
 /// Open at the pointer on a right click or a stationary long press.
 pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
     context_menu_with_id(anchor, Popup::default_response_id(anchor), add)
+}
+
+/// Like `context_menu`, but it opens right above `anchor`, lined up with it, like the
+/// menus of a call's buttons. Where there is no room above, it opens where it fits.
+pub fn button_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let popup = Popup::context_menu(anchor)
+        .anchor(anchor.rect)
+        .align(RectAlign::TOP_START)
+        .gap(4.0);
+    open_context(anchor, popup, add)
 }
 
 pub fn context_menu_with_id<R>(
@@ -436,8 +457,16 @@ pub fn context_menu_with_id<R>(
     id: egui::Id,
     add: impl FnOnce(&mut Menu) -> R,
 ) -> Option<R> {
+    open_context(anchor, Popup::context_menu(anchor).id(id), add)
+}
+
+/// Show `popup`, a context menu of `anchor`, also opening it on a long press.
+fn open_context<R>(
+    anchor: &Response,
+    mut popup: Popup,
+    add: impl FnOnce(&mut Menu) -> R,
+) -> Option<R> {
     let ctx = &anchor.ctx;
-    let mut popup = Popup::context_menu(anchor).id(id);
     // A selectable label or link can own the hold or right click inside a row.
     // Nested menus (e.g. a saved file inside a message) get first choice as
     // children draw first.

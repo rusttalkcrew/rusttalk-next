@@ -239,6 +239,8 @@ struct Picked {
     stopped: Option<Stop>,
     stop_screen: bool,
     change_screen: bool,
+    /// Share the same screen again with this quality, frame rate and cursor.
+    restyle: Option<screen::Options>,
     terminal: Option<Shell>,
     diagram: Option<super::diagram::Pick>,
     live: Option<LiveAction>,
@@ -428,7 +430,7 @@ pub fn device_choices(button: &Response, home: &mut Home, mic: bool) {
     } else {
         (t!("call.speakers"), &s.output, &outputs)
     };
-    let pick = ui::context_menu(button, |m| {
+    let pick = ui::button_menu(button, |m| {
         device_menu(m, title, chosen, devices, &mut picked)
     });
     if let Some(Some(pick)) = pick {
@@ -535,7 +537,7 @@ fn camera_button(
         camera_choices_menu(&button, voice, picked);
         return button;
     };
-    if let Some(pick) = ui::menu(&button, |m| camera_menu(m, controls)).flatten() {
+    if let Some(pick) = ui::menu_up(&button, false, |m| camera_menu(m, controls)).flatten() {
         let mut settings = voice.audio.settings();
         voice.camera.pick(pick, &mut settings);
         voice.audio.set_settings(settings);
@@ -552,7 +554,7 @@ fn camera_choices_menu(button: &Response, voice: &mut Voice, picked: &mut Picked
         Vec::new()
     };
     let mut s = voice.audio.settings();
-    let pick = ui::context_menu(button, |m| {
+    let pick = ui::button_menu(button, |m| {
         let pick = camera_choices(m, &s.camera, &found);
         m.separator();
         picked.video_settings |= m.item("⚙", t!("call.video_settings")).clicked();
@@ -634,7 +636,7 @@ fn screen_button(
     if voice.sharing == Sharing::Off && can.connected && can.share_video {
         let mut s = voice.audio.settings();
         let before = (s.screen_height, s.screen_fps, s.screen_cursor);
-        let share = ui::context_menu(&button, |m| screen_quick_options(m, &mut s));
+        let share = ui::button_menu(&button, |m| screen_quick_options(m, &mut s));
         if (s.screen_height, s.screen_fps, s.screen_cursor) != before {
             voice.audio.set_settings(s);
         }
@@ -643,14 +645,7 @@ fn screen_button(
         }
     }
     if voice.sharing == Sharing::On {
-        ui::context_menu(&button, |m| {
-            if m.item("🖥", t!("call.change_my_share")).clicked() {
-                picked.change_screen = true;
-            }
-            if m.danger("⏹", t!("call.stop_sharing")).clicked() {
-                picked.stop_screen = true;
-            }
-        });
+        live_screen_menu(ui, &button, voice, can.blocked, picked);
     }
     if !can.share_video {
         return button.on_disabled_hover_text(t!("call.no_screen_here"));
@@ -695,6 +690,71 @@ fn screen_quick_options(m: &mut ui::Menu, s: &mut crate::audio::Settings) -> boo
     share
 }
 
+/// The screen share button's menu while sharing: change what is shared, its quality,
+/// frame rate, cursor and sound, or stop. `blocked` says why the sound can't change.
+fn live_screen_menu(
+    ui: &Ui,
+    button: &Response,
+    voice: &Voice,
+    blocked: Option<&str>,
+    picked: &mut Picked,
+) {
+    let opening = !ui::menu_open(button);
+    let now = voice.screen_options();
+    let sound = voice.supported && blocked.is_none();
+    let mut refresh = false;
+    ui::button_menu(button, |m| {
+        if m.item("🖥", t!("call.change_my_share")).clicked() {
+            picked.change_screen = true;
+        }
+        m.separator();
+        let mut options = now;
+        m.submenu("📺", t!("call.quality"), |m| {
+            for (height, label, _) in super::screen_qualities() {
+                let item = ui::Item::new("", label).picked(now.max_height == height);
+                if m.add(item).clicked() {
+                    options.max_height = height;
+                }
+            }
+        });
+        m.submenu("🎞", t!("call.frame_rate"), |m| {
+            for (fps, _, _) in super::screen_rates() {
+                let label = format!("{fps} fps");
+                let item = ui::Item::new("", &label).picked(now.fps == fps);
+                if m.add(item).clicked() {
+                    options.fps = fps;
+                }
+            }
+        });
+        let cursor = ui::Item::new("🖱", t!("call.show_cursor")).checked(now.cursor);
+        if m.add(cursor).clicked() {
+            options.cursor ^= true;
+        }
+        if options != now {
+            picked.restyle = Some(options);
+        }
+        if sound {
+            m.submenu("🔊", t!("call.stream_sound"), |m| {
+                let (apps, again) = sound_rows(m, &voice.apps, &voice.stream_audio, true);
+                refresh = again;
+                if let Some(apps) = apps {
+                    picked.stopped.get_or_insert(Stop::Sound(apps));
+                }
+            });
+        } else {
+            m.add(ui::Item::new("🔊", t!("call.stream_sound")).enabled(false));
+        }
+        m.separator();
+        if m.danger("⏹", t!("call.stop_sharing")).clicked() {
+            picked.stop_screen = true;
+        }
+    });
+    // List the apps playing sound as the menu opens, for its sound choices.
+    if sound && (refresh || (opening && ui::menu_open(button))) {
+        fill(ui.ctx(), &voice.apps, "apps", share::list);
+    }
+}
+
 /// Carry out what the call's buttons asked for.
 fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
     let server = home
@@ -725,6 +785,9 @@ fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
     }
     if let (Some(server), true) = (server, change_screen) {
         change_screen_now(ui.ctx(), &mut home.voice, server);
+    }
+    if let (Some(server), Some(options)) = (server, picked.restyle) {
+        super::restart_screen(&mut home.voice, server, options);
     }
     if let (Some(server), true) = (server, picked.stop_screen) {
         home.voice.sharing = Sharing::Off;
@@ -797,7 +860,7 @@ fn more_button(
         .inner;
     let mut picked = None;
     let mut diagram = None;
-    ui::menu_wide(&button, |m| {
+    ui::menu_up(&button, true, |m| {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if can_call || calling {
             super::phone::menu_rows(m, &mut voice.phone, can_call);

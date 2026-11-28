@@ -554,8 +554,9 @@ fn share(home: &mut Home, found: anyhow::Result<Option<screen::Target>>) {
         Sharing::Off => false,
         Sharing::Starting | Sharing::Changing => return,
     };
+    let options = call::screen_options(&home.voice.audio.settings());
     if changing {
-        server.send(Command::ChangeScreen(target, false));
+        server.send(Command::ChangeScreen(target.clone(), false));
     } else {
         // A moderator's mute also takes a stream's sound.
         let sound = if server.voice_muted(&server.dir.me) {
@@ -563,9 +564,9 @@ fn share(home: &mut Home, found: anyhow::Result<Option<screen::Target>>) {
         } else {
             home.voice.default_stream_audio()
         };
-        let options = call::screen_options(&home.voice.audio.settings());
-        server.send(Command::ShareScreen(target, options, sound));
+        server.send(Command::ShareScreen(target.clone(), options, sound));
     }
+    call::note_shared_screen(&mut home.voice, &target, options, !changing);
     home.voice.sharing = if changing {
         Sharing::Changing
     } else {

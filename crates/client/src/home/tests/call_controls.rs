@@ -187,6 +187,115 @@ fn tablets_and_desktops_keep_controls_in_the_sidebar() {
     }
 }
 
+/// `item`, in a menu just opened from `button`, sits right above the button and lines
+/// up with its left or right edge, or its middle where neither fits, inside the window.
+fn above(h: &Harness<'_, Option<Screen>>, button: egui::Rect, item: &str, size: Vec2) {
+    let rect = h.get_by_label(item).rect();
+    assert!(
+        rect.bottom() <= button.top(),
+        "{item}: {rect:?} over {button:?}"
+    );
+    let lined_up = (rect.left() - button.left()).abs() < 16.0
+        || (rect.right() - button.right()).abs() < 16.0
+        || (rect.center().x - button.center().x).abs() < 16.0;
+    assert!(lined_up, "{item}: {rect:?} at {button:?}");
+    assert!(rect.min.x >= 0.0 && rect.max.x <= size.x && rect.min.y >= 0.0);
+}
+
+/// Right-click menus of the call's buttons and the gear open right above their button,
+/// like Discord's; the gear's lists the Settings pages.
+#[test]
+fn call_bar_menus_open_at_their_buttons() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(820.0, 1180.0), Vec2::new(1100.0, 700.0)] {
+            let mut h = in_call(dark, size, data.path());
+            for (button, item) in [
+                (t!("call.mute"), t!("common.system_default")),
+                (t!("call.deafen"), t!("common.system_default")),
+                (t!("call.camera_on"), t!("camera.first")),
+                (t!("call.share_screen"), t!("call.show_cursor")),
+            ] {
+                let rect = h.get_by_label(button).rect();
+                h.get_by_label(button).click_secondary();
+                h.run_steps(3);
+                above(&h, rect, item, size);
+                h.key_press(egui::Key::Escape);
+                h.run_steps(2);
+            }
+            let more = h.get_by_label(t!("call.more")).rect();
+            h.get_by_label(t!("call.more")).click();
+            h.run_steps(3);
+            above(&h, more, t!("diagram.start"), size);
+            h.key_press(egui::Key::Escape);
+            h.run_steps(2);
+
+            // The gear: a click still opens Settings, a right-click its pages.
+            let gear = h.get_by_label(t!("settings.title")).rect();
+            h.get_by_label(t!("settings.title")).click_secondary();
+            h.run_steps(3);
+            for page in [
+                t!("settings.my_account"),
+                t!("settings.appearance"),
+                t!("settings.about"),
+            ] {
+                assert!(h.query_by_label(page).is_some(), "{page}");
+            }
+            above(&h, gear, t!("settings.about"), size);
+            capture(&mut h, size, dark, "gear-menu");
+            h.get_by_label(t!("settings.voice")).click();
+            h.run_steps(2);
+            assert!(home(&h).settings == Some(Tab::Voice));
+        }
+    }
+}
+
+/// While sharing, the screen button's menu changes the running share's quality: it
+/// starts again with the new choice, which is kept for later shares.
+#[test]
+fn share_settings_change_while_sharing() {
+    use crate::call::Sharing;
+    let Some(target) = crate::screen::targets()
+        .ok()
+        .and_then(|t| t.into_iter().next())
+    else {
+        return;
+    };
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            let mut h = in_call(dark, size, data.path());
+            let voice = &mut h.state_mut().as_mut().unwrap().0.voice;
+            let options = crate::screen::Options::default();
+            crate::call::note_shared_screen(voice, &target, options, true);
+            voice.sharing = Sharing::On;
+            h.run_steps(3);
+            let button = h.get_by_label(t!("call.stop_sharing")).rect();
+            h.get_by_label(t!("call.stop_sharing")).click_secondary();
+            h.run_steps(3);
+            for item in [
+                t!("call.change_my_share"),
+                t!("call.quality"),
+                t!("call.frame_rate"),
+                t!("call.show_cursor"),
+                t!("call.stream_sound"),
+            ] {
+                above(&h, button, item, size);
+            }
+            h.get_by_label(t!("call.quality")).hover();
+            h.run_steps(3);
+            capture(&mut h, size, dark, "share-menu");
+            h.get_by_label("720p").click();
+            h.run_steps(3);
+            let voice = &home(&h).voice;
+            assert!(voice.sharing == Sharing::Starting, "started again");
+            assert_eq!(voice.screen_options().max_height, Some(720));
+            assert_eq!(voice.audio.settings().screen_height, Some(720));
+            assert!(h.query_by_label(t!("call.change_my_share")).is_none());
+        }
+    }
+}
+
 /// Our camera on, as a phone's camera that can do what `controls` says.
 fn camera_on(h: &mut Harness<'_, Option<Screen>>, controls: crate::camera::Controls) {
     let ctx = h.ctx.clone();
