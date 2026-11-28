@@ -883,13 +883,12 @@ mod tests {
             shrink(&mut frame);
             shrunk.push(start.elapsed());
         }
-        // Compared on the same machine at the same time, by median: on a busy
-        // CI runner every round is slower, so a fixed limit failed there.
-        let median = |mut took: Vec<Duration>| {
-            took.sort();
-            took[took.len() / 2]
-        };
-        let (each, shrink) = (median(handed), median(shrunk));
+        // Compared on the same machine at the same time, by the fastest round:
+        // a busy CI runner can deschedule the capture right after it wakes the
+        // worker, which made even the median handover slower than a shrink.
+        // Noise only adds time, so the fastest round is the real cost.
+        let fastest = |took: Vec<Duration>| took.into_iter().min().unwrap();
+        let (each, shrink) = (fastest(handed), fastest(shrunk));
         println!(
             "capture-side cost per 4K frame handed to the preview: {each:?}, shrinking it: {shrink:?}"
         );
