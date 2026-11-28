@@ -21,8 +21,8 @@ pub use completion::completion;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 pub use menu::touch_menu;
 pub use menu::{
-    Item, Menu, context_menu, context_menu_with_id, is_open as menu_open, menu, menu_above,
-    menu_below, menu_wide, menu_with_id,
+    Item, Menu, button_menu, context_menu, context_menu_with_id, is_open as menu_open, menu,
+    menu_above, menu_below, menu_up, menu_wide, menu_with_id,
 };
 pub use page::*;
 pub use start::{onboarding, step_title};

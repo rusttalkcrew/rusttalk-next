@@ -62,12 +62,18 @@ pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
     let mut picked = None;
     ui::right_row(ui, BAR_HEIGHT, |ui| {
         ui.spacing_mut().item_spacing.x = ui::SPACE_XS;
-        if settings_button(ui, update_available).clicked() {
+        let gear = settings_button(ui, update_available);
+        if gear.clicked() {
             home.settings = Some(if update_available {
                 Tab::Updates
             } else {
                 Tab::Profile
             });
+        }
+        if let Some(Some(tab)) =
+            ui::button_menu(&gear, false, |m| settings_menu(m, update_available))
+        {
+            home.settings = Some(tab);
         }
         if home.voice.call.is_some() {
             sound_buttons(ui, home);
@@ -144,6 +150,23 @@ fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
         }
         if m.add(item).clicked() {
             picked = Some(choice);
+        }
+    }
+    picked
+}
+
+/// A right-click on the gear: the pages of Settings, grouped as in its sidebar.
+fn settings_menu(m: &mut ui::Menu, update_available: bool) -> Option<Tab> {
+    let mut picked = None;
+    for (at, group) in crate::settings::groups(update_available).iter().enumerate() {
+        if at > 0 {
+            m.separator();
+        }
+        m.caption(group.title);
+        for page in &group.pages {
+            if m.item(page.icon, page.label).clicked() {
+                picked = Some(page.id);
+            }
         }
     }
     picked

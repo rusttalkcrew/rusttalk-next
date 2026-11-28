@@ -375,18 +375,37 @@ fn show<R>(popup: Popup, width: f32, add: impl FnOnce(&mut Menu) -> R) -> Option
     } else {
         popup
     };
+    // A menu taller than the window last frame, like Settings' pages on a phone held
+    // sideways, scrolls. Only then: a scroll area sized before the menu is placed
+    // would cut short menus that do fit.
+    let tall = popup.get_id().with("tall");
+    let scroll = ctx.data(|data| data.get_temp(tall)).unwrap_or(false);
+    let tallest = (ctx.content_rect().height() - 2.0 * super::SPACE_L).max(MENU_ROW);
     popup
         .width(width)
         .show(|ui| {
-            ui.set_width(content_width(width));
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let mut menu = Menu {
-                ui,
-                controls: false,
+            let fill = |ui: &mut Ui| {
+                ui.set_width(content_width(width));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let mut menu = Menu {
+                    ui,
+                    controls: false,
+                };
+                let inner = add(&mut menu);
+                let controls = menu.controls;
+                ctx.data_mut(|data| data.insert_temp(keep, controls));
+                inner
             };
-            let inner = add(&mut menu);
-            let controls = menu.controls;
-            ctx.data_mut(|data| data.insert_temp(keep, controls));
+            let (inner, height) = if scroll {
+                let shown = egui::ScrollArea::vertical()
+                    .max_height(tallest)
+                    .show(ui, fill);
+                (shown.inner, shown.content_size.y)
+            } else {
+                let inner = fill(ui);
+                (inner, ui.min_rect().height())
+            };
+            ctx.data_mut(|data| data.insert_temp(tall, height > tallest));
             inner
         })
         .map(|inner| inner.inner)
@@ -426,9 +445,36 @@ pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opt
     show(popup, MENU_WIDE, add)
 }
 
+/// A menu that opens right above `anchor` when it is clicked, lined up with its left
+/// edge, or wherever it fits better. `wide` for rows with a line of help.
+pub fn menu_up<R>(anchor: &Response, wide: bool, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let width = if wide { MENU_WIDE } else { MENU_WIDTH };
+    show(
+        Popup::menu(anchor).gap(4.0).align(RectAlign::TOP_START),
+        width,
+        add,
+    )
+}
+
 /// Open at the pointer on a right click or a stationary long press.
 pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
     context_menu_with_id(anchor, Popup::default_response_id(anchor), add)
+}
+
+/// Like `context_menu`, but it opens right above `anchor`, lined up with it, like the
+/// menus of a call's buttons. Where there is no room above, it opens where it fits.
+/// `wide` for long names, like devices.
+pub fn button_menu<R>(
+    anchor: &Response,
+    wide: bool,
+    add: impl FnOnce(&mut Menu) -> R,
+) -> Option<R> {
+    let popup = Popup::context_menu(anchor)
+        .anchor(anchor.rect)
+        .align(RectAlign::TOP_START)
+        .gap(4.0);
+    let width = if wide { MENU_WIDE } else { MENU_WIDTH };
+    open_context(anchor, popup, width, add)
 }
 
 pub fn context_menu_with_id<R>(
@@ -436,8 +482,17 @@ pub fn context_menu_with_id<R>(
     id: egui::Id,
     add: impl FnOnce(&mut Menu) -> R,
 ) -> Option<R> {
+    open_context(anchor, Popup::context_menu(anchor).id(id), MENU_WIDTH, add)
+}
+
+/// Show `popup`, a context menu of `anchor`, also opening it on a long press.
+fn open_context<R>(
+    anchor: &Response,
+    mut popup: Popup,
+    width: f32,
+    add: impl FnOnce(&mut Menu) -> R,
+) -> Option<R> {
     let ctx = &anchor.ctx;
-    let mut popup = Popup::context_menu(anchor).id(id);
     // A selectable label or link can own the hold or right click inside a row.
     // Nested menus (e.g. a saved file inside a message) get first choice as
     // children draw first.
@@ -456,7 +511,7 @@ pub fn context_menu_with_id<R>(
             popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
         }
     }
-    show(popup, MENU_WIDTH, add)
+    show(popup, width, add)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]
