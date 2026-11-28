@@ -27,6 +27,8 @@ ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"]
 # Desktops add the default features below. Their `wayland` feature makes arboard
 # build Wayland's clipboard on iOS, which arboard counts as a Linux-like system.
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "links", "system_fonts", "wgpu"] }
+# Decodes the bundled voice pack lines (Ogg Vorbis, src/sounds.rs).
+lewton = "0.10"
 # Bundled emoji glyphs, so icons and chat emoji render without system fonts.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 etcetera = "0.11"

@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Hear call sounds as short spoken announcements instead of chimes: Settings → Sounds → Voice announcements. New sounds for a friend joining, switching channels, joining a listen-only channel, getting disconnected, reconnecting, a moderator muting or unmuting you, and someone else starting a stream.
+
 ## v0.12.0 - 2026-11-28
 
 - On a phone held sideways, the voice panel in the sidebar keeps to one row of buttons and the server list scrolls, so the channel list keeps its room.
