@@ -18,7 +18,8 @@ const MAX_DEVICE_NAME_BYTES: usize = 64;
 const CERT_DOMAIN: &[u8] = b"rusttalk-device-cert-v1";
 const PUBLIC_CERT_DOMAIN: &[u8] = b"rusttalk-device-cert-v2";
 const LOCAL_CERT_DOMAIN: &[u8] = b"rusttalk-device-local-v2";
-const PUBLIC_CERT_LEN: usize = PUBLIC_CERT_DOMAIN.len() + 32 + 32 + 8 + 32 + 64;
+/// The length of a public (v2) device certificate.
+pub const PUBLIC_CERT_LEN: usize = PUBLIC_CERT_DOMAIN.len() + 32 + 32 + 8 + 32 + 64;
 const REVOCATION_DOMAIN: &[u8] = b"rusttalk-device-revocation-v1";
 
 pub type PersonId = [u8; 32];

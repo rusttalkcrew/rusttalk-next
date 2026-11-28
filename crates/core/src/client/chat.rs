@@ -29,11 +29,23 @@ pub(super) struct Opened {
     order: VecDeque<[u8; 32]>,
     bodies: HashMap<[u8; 32], Seen>,
     edits: HashMap<[u8; 32], Vec<[u8; 32]>>,
+    /// Each opened message's and shared file's epoch and first 16 nonce bytes, which pick
+    /// the key a report discloses (see `reports`): two records sharing them share that key.
+    prefixes: HashMap<(i64, [u8; 16]), PrefixState>,
+}
+
+/// Who used one nonce prefix in one epoch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PrefixState {
+    One([u8; 32]),
+    /// Two records did: neither can be reported. Kept for good, also past eviction.
+    Collided,
 }
 
 /// One opened record: its digest, sender (kept so edits of it can be checked offline) and body.
 struct Seen {
     digest: [u8; 32],
+    prefix: Option<(i64, [u8; 16])>,
     person: PersonId,
     sender_device: [u8; 32],
     body: MessageBody,
@@ -67,10 +79,12 @@ impl Opened {
         if self.bodies.contains_key(&record.id) {
             return;
         }
+        let prefix = self.note_prefix(record);
         self.bodies.insert(
             record.id,
             Seen {
                 digest: digest(record),
+                prefix,
                 person: record.person,
                 sender_device: record.sender_device,
                 body: body.clone(),
@@ -83,15 +97,58 @@ impl Opened {
         if self.order.len() > OPENED_PER_CHANNEL
             && let Some(old) = self.order.pop_front()
             && let Some(seen) = self.bodies.remove(&old)
-            && let Some(original) = seen.body.edit_of
-            && let Some(ids) = self.edits.get_mut(&original)
         {
-            ids.retain(|id| *id != old);
-            if ids.is_empty() {
-                self.edits.remove(&original);
+            if let Some(prefix) = seen.prefix
+                && self.prefixes.get(&prefix) == Some(&PrefixState::One(old))
+            {
+                self.prefixes.remove(&prefix);
+            }
+            if let Some(original) = seen.body.edit_of
+                && let Some(ids) = self.edits.get_mut(&original)
+            {
+                ids.retain(|id| *id != old);
+                if ids.is_empty() {
+                    self.edits.remove(&original);
+                }
             }
         }
     }
+}
+
+impl Opened {
+    /// Remember a verified record's nonce prefix; a second record with it marks both.
+    fn note_prefix(&mut self, record: &MessageRecord) -> Option<(i64, [u8; 16])> {
+        let key = (record.epoch, nonce_prefix(record)?);
+        match self.prefixes.get(&key) {
+            None => {
+                self.prefixes.insert(key, PrefixState::One(record.id));
+            }
+            Some(PrefixState::One(id)) if *id != record.id => {
+                self.prefixes.insert(key, PrefixState::Collided);
+            }
+            Some(_) => {}
+        }
+        Some(key)
+    }
+
+    /// Whether another opened record of this epoch has the same nonce prefix, so the key a
+    /// report of `record` discloses would open that one too. True for both records.
+    pub(super) fn shares_prefix(&self, record: &MessageRecord) -> bool {
+        nonce_prefix(record).is_some_and(|prefix| {
+            match self.prefixes.get(&(record.epoch, prefix)) {
+                Some(PrefixState::One(id)) => *id != record.id,
+                Some(PrefixState::Collided) => true,
+                None => false,
+            }
+        })
+    }
+}
+
+/// The first 16 nonce bytes of a record's envelope: unpadded base64url keeps the first 18
+/// bytes in its first 24 characters, the version byte and 17 of the nonce.
+fn nonce_prefix(record: &MessageRecord) -> Option<[u8; 16]> {
+    let head = decode_bytes(record.envelope.get(..24)?).ok()?;
+    head.get(1..17)?.try_into().ok()
 }
 
 /// Accept a server record only under the ID it was asked for or announced with.
@@ -531,7 +588,7 @@ impl KeyClient<'_> {
     /// Keep an uploaded file (without a thumbnail) in its channel's file list: a signed
     /// record under the file's ID, sealed with the channel key, whose only content is the
     /// file's reference.
-    pub async fn share_file(&self, channel: &[u8; 32], file: &Attachment) -> Result<()> {
+    pub async fn share_file(&mut self, channel: &[u8; 32], file: &Attachment) -> Result<()> {
         ensure!(file.thumbnail.is_none(), "a shared file has no thumbnail");
         let scope = Scope {
             kind: Kind::Channel,
@@ -549,8 +606,23 @@ impl KeyClient<'_> {
         };
         let body = shared_body(file.clone());
         let envelope = context.seal_as(Purpose::SharedFile, key, self.identity, &body)?;
+        // Its nonce prefix counts like any opened record's (see `Opened`).
+        let record = MessageRecord {
+            backfilled: false,
+            id: file.file.id,
+            epoch,
+            person: context.person,
+            sender_device: context.sender_device,
+            at: 0,
+            size: envelope.len(),
+            envelope: encode(&envelope),
+        };
+        self.opened
+            .entry(*channel)
+            .or_default()
+            .note_prefix(&record);
         let envelope =
-            json!({ "id": encode(&file.file.id), "epoch": epoch, "envelope": encode(&envelope) });
+            json!({ "id": encode(&file.file.id), "epoch": epoch, "envelope": record.envelope });
         let response = (self.request(Method::POST, &shared_path(channel)))
             .json(&envelope)
             .send()
@@ -589,6 +661,10 @@ impl KeyClient<'_> {
             let opened = self
                 .decrypt_record(channel, &record, Purpose::SharedFile)
                 .await;
+            // Shared files use the channel key too: their prefixes count (see `Opened`).
+            if opened.is_ok() {
+                (self.opened.entry(*channel).or_default()).note_prefix(&record);
+            }
             match opened.and_then(|body| shared_file(&record, body)) {
                 Ok(file) => files.push(SharedFile {
                     person: record.person,
@@ -636,7 +712,7 @@ impl KeyClient<'_> {
         Ok(context.open_as(purpose, key, &sender, &bytes)?)
     }
 
-    async fn message_sender(
+    pub(super) async fn message_sender(
         &mut self,
         channel: &[u8; 32],
         record: &MessageRecord,
@@ -694,6 +770,8 @@ impl KeyClient<'_> {
         let body = self
             .decrypt_record(channel, &record, Purpose::Message)
             .await?;
+        // Opened here too: its nonce prefix counts (see `Opened`).
+        (self.opened.entry(*channel).or_default()).note_prefix(&record);
         authorize_edit(author, &record.person, &body)?;
         Ok(())
     }
@@ -729,7 +807,7 @@ pub(super) enum Posting {
 }
 
 /// Every stored file a message uses: its files and their thumbnails.
-fn kept_files(body: &MessageBody) -> Vec<String> {
+pub(super) fn kept_files(body: &MessageBody) -> Vec<String> {
     (body.attachments.iter())
         .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
         .map(|blob| encode(&blob.id))
@@ -795,6 +873,43 @@ mod tests {
             size: 0,
             envelope: envelope.into(),
         }
+    }
+
+    #[test]
+    fn records_sharing_a_nonce_prefix_are_noticed_before_a_report() {
+        let envelope = |prefix: u8, tail: u8| {
+            encode(&[vec![3], vec![prefix; 16], vec![tail; 8], vec![0; 100]].concat())
+        };
+        let mut opened = Opened::default();
+        let body = MessageBody::default();
+        let first = record(1, &envelope(7, 1));
+        opened.insert(&first, &body);
+        assert!(!opened.shares_prefix(&first));
+        // Same epoch and prefix under another ID: a key disclosed for one opens both, so
+        // both are refused, whichever was opened first.
+        let second = record(2, &envelope(7, 2));
+        assert!(opened.shares_prefix(&second));
+        opened.insert(&second, &body);
+        assert!(opened.shares_prefix(&first) && opened.shares_prefix(&second));
+        // Even after both are evicted from the cache.
+        for n in 0..OPENED_PER_CHANNEL as u32 {
+            let mut filler = record(3, &envelope(9, 3));
+            filler.id[..4].copy_from_slice(&n.to_be_bytes());
+            filler.envelope = encode(&[vec![3], n.to_be_bytes().repeat(4), vec![0; 108]].concat());
+            opened.insert(&filler, &body);
+        }
+        assert!(!opened.bodies.contains_key(&first.id));
+        assert!(opened.shares_prefix(&first));
+        // A shared file's record counts like a message.
+        let file = record(4, &envelope(5, 4));
+        opened.note_prefix(&file);
+        assert!(opened.shares_prefix(&record(5, &envelope(5, 5))));
+        assert!(!opened.shares_prefix(&record(2, &envelope(8, 2))));
+        let later = MessageRecord {
+            epoch: 2,
+            ..record(2, &envelope(7, 2))
+        };
+        assert!(!opened.shares_prefix(&later));
     }
 
     #[test]
