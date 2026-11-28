@@ -183,6 +183,21 @@ pub struct ServerStats {
     pub storage: StatsStorage,
     /// Resident memory of the API, where the system tells it (Linux).
     pub memory: Option<u64>,
+    /// Calls, as LiveKit tells them; `None` when it doesn't answer or the server predates it.
+    #[serde(default)]
+    pub voice: Option<StatsVoice>,
+}
+
+/// People in voice channels and their unmuted streams.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsVoice {
+    pub people: u64,
+    /// Voice channels with someone in them.
+    pub channels: u64,
+    /// Microphones on.
+    pub audio: u64,
+    pub camera: u64,
+    pub screen: u64,
 }
 
 /// Most people connected at once since start, and when.
@@ -196,6 +211,9 @@ pub struct StatsPeak {
 pub struct StatsTraffic {
     /// The API's own connections: sign-in, chat, files and live updates.
     pub control: StatsDirection,
+    /// Voice and video through LiveKit, since LiveKit started; `None` when it doesn't answer.
+    #[serde(default)]
+    pub media: Option<StatsDirection>,
 }
 
 /// Bytes since start and per second just now.

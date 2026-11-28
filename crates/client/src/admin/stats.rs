@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
-use eframe::egui::{self, RichText, Ui};
-use rusttalk_core::auth::ServerStats;
+use eframe::egui::{self, Color32, RichText, Sense, Ui, Vec2};
+use rusttalk_core::auth::{ServerStats, StatsDirection};
 
 use crate::{files::size, net::Admin, ui};
 
@@ -41,7 +41,10 @@ impl View {
             ui::error_text(ui, Some(text));
         }
         match &self.stats {
-            Some(stats) => tiles(ui, stats),
+            Some(stats) => {
+                tiles(ui, stats);
+                by_kind(ui, stats);
+            }
             None if self.error.is_none() => {
                 ui.spinner();
             }
@@ -54,8 +57,22 @@ impl View {
     }
 }
 
-fn tiles(ui: &mut Ui, stats: &ServerStats) {
+/// The API's traffic plus LiveKit's, when it answered.
+fn total(stats: &ServerStats) -> StatsDirection {
     let control = stats.traffic.control;
+    let media = stats.traffic.media.unwrap_or_default();
+    StatsDirection {
+        received: control.received.saturating_add(media.received),
+        sent: control.sent.saturating_add(media.sent),
+        received_per_sec: control
+            .received_per_sec
+            .saturating_add(media.received_per_sec),
+        sent_per_sec: control.sent_per_sec.saturating_add(media.sent_per_sec),
+    }
+}
+
+fn tiles(ui: &mut Ui, stats: &ServerStats) {
+    let traffic = total(stats);
     let mut people = t!("admin.stats_members", members = stats.members.max(0) as u64);
     if stats.peak.count > 0 {
         let peak = t!(
@@ -70,12 +87,35 @@ fn tiles(ui: &mut Ui, stats: &ServerStats) {
         database = size(stats.storage.database),
         files = size(stats.storage.files)
     );
-    let mut list = vec![
-        (
-            t!("admin.stats_connected").to_owned(),
-            stats.connected.to_string(),
-            people,
-        ),
+    let mut list = vec![(
+        t!("admin.stats_connected").to_owned(),
+        stats.connected.to_string(),
+        people,
+    )];
+    if let Some(voice) = stats.voice {
+        list.extend([
+            (
+                t!("admin.stats_in_voice").to_owned(),
+                voice.people.to_string(),
+                t!("admin.stats_voice_channels", count = voice.channels),
+            ),
+            (
+                t!("admin.stats_audio").to_owned(),
+                voice.audio.to_string(),
+                t!("admin.stats_audio_help").to_owned(),
+            ),
+            (
+                t!("admin.stats_video").to_owned(),
+                voice.camera.saturating_add(voice.screen).to_string(),
+                t!(
+                    "admin.stats_video_split",
+                    cameras = voice.camera,
+                    screens = voice.screen
+                ),
+            ),
+        ]);
+    }
+    list.extend([
         (
             t!("admin.stats_logins").to_owned(),
             stats.logins.to_string(),
@@ -88,13 +128,13 @@ fn tiles(ui: &mut Ui, stats: &ServerStats) {
         ),
         (
             t!("admin.stats_incoming").to_owned(),
-            per_second(control.received_per_sec),
-            t!("admin.stats_total", total = size(control.received)),
+            per_second(traffic.received_per_sec),
+            t!("admin.stats_total", total = size(traffic.received)),
         ),
         (
             t!("admin.stats_outgoing").to_owned(),
-            per_second(control.sent_per_sec),
-            t!("admin.stats_total", total = size(control.sent)),
+            per_second(traffic.sent_per_sec),
+            t!("admin.stats_total", total = size(traffic.sent)),
         ),
         (
             t!("admin.stats_storage").to_owned(),
@@ -106,7 +146,7 @@ fn tiles(ui: &mut Ui, stats: &ServerStats) {
             uptime(stats.uptime_secs),
             t!("admin.stats_version", version = stats.version),
         ),
-    ];
+    ]);
     if let Some(memory) = stats.memory {
         list.push((
             t!("admin.stats_memory").to_owned(),
@@ -128,8 +168,70 @@ fn tiles(ui: &mut Ui, stats: &ServerStats) {
             });
         }
     });
-    ui.add_space(gap);
-    ui.label(ui::caption(t!("admin.stats_traffic_scope")));
+}
+
+/// Traffic since start split into voice and video and the rest, in and out.
+fn by_kind(ui: &mut Ui, stats: &ServerStats) {
+    ui::page_section(ui, t!("admin.stats_by_kind"));
+    let control = stats.traffic.control;
+    let Some(media) = stats.traffic.media else {
+        ui.label(ui::caption(t!("admin.stats_no_media")));
+        return;
+    };
+    let media_color = ui::accent(ui).base;
+    let control_color = ui::colors(ui).muted;
+    for (label, media, control) in [
+        (t!("admin.stats_incoming"), media.received, control.received),
+        (t!("admin.stats_outgoing"), media.sent, control.sent),
+    ] {
+        ui::caption_label(ui, label);
+        bar(ui, &[(media, media_color), (control, control_color)]);
+        ui.horizontal_wrapped(|ui| {
+            key(
+                ui,
+                media_color,
+                &t!("admin.stats_media", size = size(media)),
+            );
+            key(
+                ui,
+                control_color,
+                &t!("admin.stats_control", size = size(control)),
+            );
+        });
+        ui.add_space(ui::SPACE_S);
+    }
+    ui.label(ui::caption(t!("admin.stats_media_scope")));
+}
+
+/// A bar split in proportion to `parts`.
+fn bar(ui: &mut Ui, parts: &[(u64, Color32)]) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 12.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, ui::RADIUS_S, ui::colors(ui).hover);
+    let sum: u64 = parts.iter().map(|(bytes, _)| *bytes).sum();
+    if sum == 0 {
+        return;
+    }
+    let mut left = rect.left();
+    for (bytes, color) in parts {
+        let width = rect.width() * (*bytes as f64 / sum as f64) as f32;
+        if width <= 0.0 {
+            continue;
+        }
+        let part = egui::Rect::from_min_size(
+            egui::pos2(left, rect.top()),
+            Vec2::new(width, rect.height()),
+        );
+        painter.rect_filled(part, ui::RADIUS_S, *color);
+        left += width;
+    }
+}
+
+fn key(ui: &mut Ui, color: Color32, text: &str) {
+    let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+    ui.painter().circle_filled(dot.center(), 4.0, color);
+    ui.label(ui::caption(text));
+    ui.add_space(ui::SPACE_S);
 }
 
 fn tile(ui: &mut Ui, width: f32, label: &str, value: &str, detail: &str) {

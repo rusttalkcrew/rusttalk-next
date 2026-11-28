@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Server settings > Statistics shows owners and admins who is connected, sign-ins, messages, traffic, storage, uptime and memory, refreshed every 2 seconds. Only counts and sizes, no content.
+- Server statistics also show who is in voice, audio and video streams, and traffic split into voice and video and the rest.
 
 ## v0.12.0 - 2026-11-28
 

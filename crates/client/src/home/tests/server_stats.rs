@@ -4,7 +4,9 @@
 use super::*;
 use crate::net::{Admin, AdminUpdate};
 use egui_kittest::{Harness, kittest::Queryable};
-use rusttalk_core::auth::{ServerStats, StatsDirection, StatsPeak, StatsStorage, StatsTraffic};
+use rusttalk_core::auth::{
+    ServerStats, StatsDirection, StatsPeak, StatsStorage, StatsTraffic, StatsVoice,
+};
 
 type Sent = tokio::sync::mpsc::UnboundedReceiver<Command>;
 
@@ -28,12 +30,25 @@ fn stats() -> ServerStats {
                 received_per_sec: 2048,
                 sent_per_sec: 4096,
             },
+            media: Some(StatsDirection {
+                received: 20 * 1024 * 1024,
+                sent: 60 * 1024 * 1024,
+                received_per_sec: 100 * 1024,
+                sent_per_sec: 300 * 1024,
+            }),
         },
         storage: StatsStorage {
             database: 2 * 1024 * 1024,
             files: 6 * 1024 * 1024,
         },
         memory: Some(48 * 1024 * 1024),
+        voice: Some(StatsVoice {
+            people: 5,
+            channels: 2,
+            audio: 4,
+            camera: 2,
+            screen: 1,
+        }),
     }
 }
 
@@ -104,7 +119,11 @@ fn asked(sent: &mut Sent) -> usize {
 fn people_allowed_see_the_numbers_and_they_refresh() {
     let screenshots = std::env::var("RUSTTALK_TEST_SCREENSHOTS").ok();
     for dark in [true, false] {
-        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+        for size in [
+            Vec2::new(390.0, 844.0),
+            Vec2::new(820.0, 1180.0),
+            Vec2::new(1100.0, 700.0),
+        ] {
             let (mut h, mut sent) = screen(size, dark, true);
             // Opening the page asks once, not every frame.
             assert_eq!(asked(&mut sent), 1);
@@ -117,12 +136,18 @@ fn people_allowed_see_the_numbers_and_they_refresh() {
                 "12",
                 "321",
                 "4567",
-                "2 KB/s",
+                // Incoming adds the API's and LiveKit's traffic.
+                "102 KB/s",
+                "23.0 MB since start",
                 "8.0 MB",
+                "in 2 channels",
+                "Cameras: 2 · Screens: 1",
+                "Voice and video 60.0 MB",
+                "Control and chat 5.0 MB",
                 "2 d 3 h 4 min",
                 "Version 9.8.7",
                 "48.0 MB",
-                t!("admin.stats_traffic_scope"),
+                t!("admin.stats_media_scope"),
             ] {
                 assert!(
                     h.query_all_by_label_contains(text).next().is_some(),
@@ -139,12 +164,41 @@ fn people_allowed_see_the_numbers_and_they_refresh() {
                     ))
                     .unwrap();
             }
+            // The traffic bars, reached from the page's section list.
+            if size.x > 1000.0 {
+                if let Some(link) = h.query_all_by_label(t!("admin.stats_by_kind")).next() {
+                    link.click();
+                }
+                h.run_steps(8);
+                if let Some(dir) = &screenshots {
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(format!("{dir}/server-stats-traffic-{theme}.png"))
+                        .unwrap();
+                }
+            }
             // A failed refresh keeps the last numbers and says what went wrong.
             apply(&mut h, Err("Server unreachable".into()));
             assert!(h.query_by_label_contains("Server unreachable").is_some());
             assert!(h.query_all_by_label_contains("4567").next().is_some());
         }
     }
+}
+
+#[test]
+fn without_livekit_the_rest_still_shows() {
+    let (mut h, _) = screen(Vec2::new(1100.0, 700.0), true, true);
+    let mut older = stats();
+    (older.voice, older.traffic.media) = (None, None);
+    apply(&mut h, Ok(older));
+    assert!(
+        h.query_by_label_contains(t!("admin.stats_no_media"))
+            .is_some()
+    );
+    assert!(h.query_all_by_label_contains("2 KB/s").next().is_some());
+    let in_voice = t!("admin.stats_in_voice").to_uppercase();
+    assert!(h.query_all_by_label_contains(&in_voice).next().is_none());
 }
 
 #[test]
