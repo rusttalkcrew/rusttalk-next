@@ -173,7 +173,7 @@ fn tablets_and_desktops_keep_controls_in_the_sidebar() {
                 (t!("call.mute"), t!("common.system_default")),
                 (t!("call.deafen"), t!("common.system_default")),
                 (t!("call.camera_on"), t!("camera.first")),
-                (t!("call.share_screen"), "1440p"),
+                (t!("call.share_screen"), t!("call.quality")),
             ] {
                 h.get_by_label(button).click_secondary();
                 h.run_steps(2);

@@ -641,7 +641,7 @@ fn screen_button(
     if voice.sharing == Sharing::Off && can.connected && can.share_video {
         let mut s = voice.audio.settings();
         let before = (s.screen_height, s.screen_fps, s.screen_cursor);
-        let share = ui::button_menu(&button, false, |m| screen_quick_options(m, &mut s));
+        let share = ui::button_menu(&button, true, |m| screen_quick_options(m, &mut s));
         if (s.screen_height, s.screen_fps, s.screen_cursor) != before {
             voice.audio.set_settings(s);
         }
@@ -670,29 +670,40 @@ fn screen_button(
 /// Returns whether to open the share dialog.
 fn screen_quick_options(m: &mut ui::Menu, s: &mut crate::audio::Settings) -> bool {
     let share = m.item("🖥", t!("call.share_screen")).clicked();
-    let options = super::screen_options(s);
     m.separator();
-    m.caption(t!("call.quality"));
-    for (height, label, _) in super::screen_qualities() {
-        let item = ui::Item::new("", label).picked(options.max_height == height);
-        if m.add(item).clicked() {
-            s.screen_height = height;
-        }
-    }
-    m.separator();
-    m.caption(t!("call.frame_rate"));
-    for (fps, label, _) in super::screen_rates() {
-        let item = ui::Item::new("", label).picked(options.fps == fps);
-        if m.add(item).clicked() {
-            s.screen_fps = fps;
-        }
-    }
-    m.separator();
-    let cursor = ui::Item::new("", t!("call.show_cursor")).checked(s.screen_cursor);
-    if m.add(cursor).clicked() {
-        s.screen_cursor ^= true;
-    }
+    let options = screen_option_rows(m, super::screen_options(s));
+    s.screen_height = options.max_height;
+    s.screen_fps = options.fps;
+    s.screen_cursor = options.cursor;
     share
+}
+
+/// Quality and frame rate as submenus, then the cursor: the same rows before and
+/// while sharing. Returns `now` with what was picked.
+fn screen_option_rows(m: &mut ui::Menu, now: screen::Options) -> screen::Options {
+    let mut options = now;
+    m.submenu("📺", t!("call.quality"), |m| {
+        for (height, label, _) in super::screen_qualities() {
+            let item = ui::Item::new("", label).picked(now.max_height == height);
+            if m.add(item).clicked() {
+                options.max_height = height;
+            }
+        }
+    });
+    m.submenu("🎞", t!("call.frame_rate"), |m| {
+        for (fps, _, _) in super::screen_rates() {
+            let label = format!("{fps} fps");
+            let item = ui::Item::new("", &label).picked(now.fps == fps);
+            if m.add(item).clicked() {
+                options.fps = fps;
+            }
+        }
+    });
+    let cursor = ui::Item::new("🖱", t!("call.show_cursor")).checked(now.cursor);
+    if m.add(cursor).clicked() {
+        options.cursor ^= true;
+    }
+    options
 }
 
 /// The screen share button's menu while sharing: change what is shared, its quality,
@@ -708,33 +719,12 @@ fn live_screen_menu(
     let now = voice.screen_options();
     let sound = voice.supported && blocked.is_none();
     let mut refresh = false;
-    ui::button_menu(button, false, |m| {
+    ui::button_menu(button, true, |m| {
         if m.item("🖥", t!("call.change_my_share")).clicked() {
             picked.change_screen = true;
         }
         m.separator();
-        let mut options = now;
-        m.submenu("📺", t!("call.quality"), |m| {
-            for (height, label, _) in super::screen_qualities() {
-                let item = ui::Item::new("", label).picked(now.max_height == height);
-                if m.add(item).clicked() {
-                    options.max_height = height;
-                }
-            }
-        });
-        m.submenu("🎞", t!("call.frame_rate"), |m| {
-            for (fps, _, _) in super::screen_rates() {
-                let label = format!("{fps} fps");
-                let item = ui::Item::new("", &label).picked(now.fps == fps);
-                if m.add(item).clicked() {
-                    options.fps = fps;
-                }
-            }
-        });
-        let cursor = ui::Item::new("🖱", t!("call.show_cursor")).checked(now.cursor);
-        if m.add(cursor).clicked() {
-            options.cursor ^= true;
-        }
+        let options = screen_option_rows(m, now);
         if options != now {
             picked.restyle = Some(options);
         }
