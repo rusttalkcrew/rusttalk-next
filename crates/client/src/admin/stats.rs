@@ -1,10 +1,12 @@
 //! Server settings > Statistics: counts and sizes the server shares, refreshed every 2 s.
 
+mod history;
+
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use eframe::egui::{self, Color32, RichText, Sense, Ui, Vec2};
-use rusttalk_core::auth::{ServerStats, StatsDirection};
+use rusttalk_core::auth::{ServerStats, StatsDirection, StatsHistory};
 
 use crate::{files::size, net::Admin, ui};
 
@@ -20,6 +22,7 @@ pub(super) struct View {
     stats: Option<ServerStats>,
     error: Option<String>,
     asked: Option<Instant>,
+    history: history::History,
 }
 
 impl View {
@@ -28,6 +31,10 @@ impl View {
             Ok(stats) => (self.stats, self.error) = (Some(stats), None),
             Err(text) => self.error = Some(text),
         }
+    }
+
+    pub(super) fn apply_history(&mut self, update: Result<StatsHistory, String>) {
+        self.history.apply(update);
     }
 
     /// Ask for fresh numbers once `REFRESH` passed, and show what's known.
@@ -44,16 +51,23 @@ impl View {
             Some(stats) => {
                 tiles(ui, stats);
                 by_kind(ui, stats);
+                self.history.show(ui);
             }
             None if self.error.is_none() => {
                 ui.spinner();
             }
             None => {}
         }
-        due.then(|| {
+        // One request a frame: history goes in the next one when both are due.
+        if due {
             self.asked = Some(Instant::now());
-            Admin::LoadStats
-        })
+            if self.history.due() {
+                ui.ctx().request_repaint();
+            }
+            return Some(Admin::LoadStats);
+        }
+        (self.history.due() && self.stats.is_some())
+            .then(|| Admin::LoadStatsHistory(self.history.asking()))
     }
 }
 
@@ -227,7 +241,7 @@ fn bar(ui: &mut Ui, parts: &[(u64, Color32)]) {
     }
 }
 
-fn key(ui: &mut Ui, color: Color32, text: &str) {
+pub(super) fn key(ui: &mut Ui, color: Color32, text: &str) {
     let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
     ui.painter().circle_filled(dot.center(), 4.0, color);
     ui.label(ui::caption(text));
@@ -248,7 +262,7 @@ fn tile(ui: &mut Ui, width: f32, label: &str, value: &str, detail: &str) {
     });
 }
 
-fn per_second(bytes: u64) -> String {
+pub(super) fn per_second(bytes: u64) -> String {
     t!("admin.stats_per_second", size = size(bytes))
 }
 
