@@ -339,6 +339,8 @@ struct Shared {
     capture_frames: AtomicU32,
     #[cfg(target_os = "ios")]
     last_capture_ms: AtomicU64,
+    /// A device menu opened: list the devices once.
+    list_devices: AtomicBool,
     /// Settings are open: open the microphone for the meter.
     testing: AtomicBool,
     /// Push-to-talk key held while the window has focus.
@@ -555,6 +557,7 @@ impl Audio {
             capture_frames: AtomicU32::new(0),
             #[cfg(target_os = "ios")]
             last_capture_ms: AtomicU64::new(0),
+            list_devices: AtomicBool::new(false),
             testing: AtomicBool::new(false),
             key_down: AtomicBool::new(false),
             hotkey_down: AtomicBool::new(false),
@@ -743,6 +746,12 @@ impl Audio {
         if self.shared().testing.swap(on, Relaxed) != on {
             self.refresh();
         }
+    }
+
+    /// List the devices again, for a device menu that just opened.
+    pub fn find_devices(&self) {
+        self.shared().list_devices.store(true, Relaxed);
+        self.refresh();
     }
 
     pub fn devices(&self) -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
@@ -1392,8 +1401,11 @@ fn devices(
         }
         let voice = shared.voice.load(Relaxed);
         let testing = shared.testing.load(Relaxed);
-        if testing {
+        // Both flags are read, so a menu's request is never left for later.
+        let asked = shared.list_devices.swap(false, Relaxed);
+        if testing || asked {
             *lock(&shared.devices) = list(&host);
+            shared.wake();
         }
         let mut problem = None;
         let want_input = voice || testing;

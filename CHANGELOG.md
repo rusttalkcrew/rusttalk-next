@@ -11,7 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Call button menus open right above their button, the screen share menu changes quality, frame rate and sound while you share, and a right-click on the gear jumps to any Settings page.
+- Call button menus open right above their button and list every mic, speaker and camera at once, the screen share menu changes quality, frame rate and sound while you share, and a right-click on the gear jumps to any Settings page.
 
 ## v0.12.0 - 2026-11-28
 

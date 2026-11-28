@@ -70,7 +70,9 @@ pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
                 Tab::Profile
             });
         }
-        if let Some(Some(tab)) = ui::button_menu(&gear, |m| settings_menu(m, update_available)) {
+        if let Some(Some(tab)) =
+            ui::button_menu(&gear, false, |m| settings_menu(m, update_available))
+        {
             home.settings = Some(tab);
         }
         if home.voice.call.is_some() {

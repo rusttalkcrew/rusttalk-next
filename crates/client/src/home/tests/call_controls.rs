@@ -250,6 +250,29 @@ fn call_bar_menus_open_at_their_buttons() {
     }
 }
 
+/// In a window too low for all of Settings' pages, the gear's menu stays inside it
+/// and scrolls.
+#[test]
+fn gear_menu_fits_a_short_window() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        let size = Vec2::new(844.0, 390.0);
+        let mut h = in_call(dark, size, data.path());
+        h.get_by_label(t!("settings.title")).click_secondary();
+        h.run_steps(3);
+        let first = h.get_by_label(t!("settings.my_account")).rect();
+        assert!(first.min.y >= 0.0 && first.max.x <= size.x, "{first:?}");
+        capture(&mut h, size, dark, "gear-menu-short");
+        h.get_by_label(t!("settings.about")).scroll_to_me();
+        h.run_steps(3);
+        let last = h.get_by_label(t!("settings.about")).rect();
+        assert!(last.max.y <= size.y, "{last:?}");
+        h.get_by_label(t!("settings.about")).click();
+        h.run_steps(2);
+        assert!(home(&h).settings == Some(Tab::About));
+    }
+}
+
 /// While sharing, the screen button's menu changes the running share's quality: it
 /// starts again with the new choice, which is kept for later shares.
 #[test]

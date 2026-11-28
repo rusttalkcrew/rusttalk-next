@@ -422,6 +422,8 @@ pub fn phone_control_count(home: &mut Home) -> usize {
 /// voice settings.
 pub fn device_choices(button: &Response, home: &mut Home, mic: bool) {
     let audio = home.voice.audio.clone();
+    // Devices are listed while Settings is open; a menu opening asks for them too.
+    let opening = !ui::menu_open(button);
     let (inputs, outputs) = audio.devices();
     let mut s = audio.settings();
     let mut picked = Picked::default();
@@ -430,9 +432,12 @@ pub fn device_choices(button: &Response, home: &mut Home, mic: bool) {
     } else {
         (t!("call.speakers"), &s.output, &outputs)
     };
-    let pick = ui::button_menu(button, |m| {
+    let pick = ui::button_menu(button, true, |m| {
         device_menu(m, title, chosen, devices, &mut picked)
     });
+    if opening && ui::menu_open(button) {
+        audio.find_devices();
+    }
     if let Some(Some(pick)) = pick {
         if mic {
             s.input = pick;
@@ -554,7 +559,7 @@ fn camera_choices_menu(button: &Response, voice: &mut Voice, picked: &mut Picked
         Vec::new()
     };
     let mut s = voice.audio.settings();
-    let pick = ui::button_menu(button, |m| {
+    let pick = ui::button_menu(button, true, |m| {
         let pick = camera_choices(m, &s.camera, &found);
         m.separator();
         picked.video_settings |= m.item("⚙", t!("call.video_settings")).clicked();
@@ -636,7 +641,7 @@ fn screen_button(
     if voice.sharing == Sharing::Off && can.connected && can.share_video {
         let mut s = voice.audio.settings();
         let before = (s.screen_height, s.screen_fps, s.screen_cursor);
-        let share = ui::button_menu(&button, |m| screen_quick_options(m, &mut s));
+        let share = ui::button_menu(&button, false, |m| screen_quick_options(m, &mut s));
         if (s.screen_height, s.screen_fps, s.screen_cursor) != before {
             voice.audio.set_settings(s);
         }
@@ -703,7 +708,7 @@ fn live_screen_menu(
     let now = voice.screen_options();
     let sound = voice.supported && blocked.is_none();
     let mut refresh = false;
-    ui::button_menu(button, |m| {
+    ui::button_menu(button, false, |m| {
         if m.item("🖥", t!("call.change_my_share")).clicked() {
             picked.change_screen = true;
         }
