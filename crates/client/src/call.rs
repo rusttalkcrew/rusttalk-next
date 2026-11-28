@@ -74,6 +74,9 @@ pub struct Voice {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pending_join: Option<(url::Url, Id, bool)>,
     pub sounds: sounds::Detector,
+    /// Whether a moderator had muted this person, as last seen in the connected call;
+    /// `None` until then, so joining while muted plays nothing.
+    pub server_muted: Option<bool>,
     /// Ping history and packet loss for the connection popup.
     pub link: Link,
     /// Apps this device shares in the call.
@@ -261,6 +264,7 @@ impl Voice {
             #[cfg(any(target_os = "android", target_os = "ios"))]
             pending_join: None,
             sounds: sounds::Detector::default(),
+            server_muted: None,
             link: Link::default(),
             shares: Vec::new(),
             stream_audio: Vec::new(),
@@ -303,6 +307,7 @@ impl Voice {
         #[cfg(target_os = "android")]
         crate::android::communication_mode(false);
         self.call = None;
+        self.server_muted = None;
         self.audio.end_voice(self.sounds.end());
         self.external_phones.clear();
         self.link = Link::default();
@@ -446,12 +451,14 @@ pub fn join_now(home: &mut Home, index: usize, channel: Id) {
         if phone::leave_or_ask(home, phone::Leave::Join(index, channel)) {
             return;
         }
+        home.voice.sounds.switching();
         leave(home);
         connect(home, index, channel);
     }
 }
 
 pub(crate) fn join_ready(home: &mut Home, index: usize, channel: Id, _now: f64) -> bool {
+    home.voice.sounds.switching();
     leave(home);
     #[cfg(target_os = "ios")]
     if let Err(error) = home.voice.audio.prepare_ios_voice() {

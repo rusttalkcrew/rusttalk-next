@@ -867,17 +867,25 @@ impl Audio {
         self.play_cue(if on { Cue::Deafened } else { Cue::Undeafened });
     }
 
-    /// Queue a chime in the speaker mixer only. Echo cancellation gets the same
-    /// reference it gets for remote audio, including any sound from the speakers.
-    /// Returns whether the chime was queued.
+    /// Forget queued chimes, for one that turned out wrong.
+    pub fn drop_cues(&self) {
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.cues.clear();
+        mixer.cue_until = None;
+    }
+
+    /// Queue a chime, or its voice line, in the speaker mixer only. Echo cancellation
+    /// gets the same reference it gets for remote audio, including any sound from the
+    /// speakers. Returns whether the sound was queued.
     pub fn play_cue(&self, cue: Cue) -> bool {
         let settings = lock(&self.shared().settings);
-        let prefs = &settings.call_sounds;
         // Deafened people only hear the chimes about deafening itself.
-        let silenced = self.deafened() && !matches!(cue, Cue::Deafened | Cue::Undeafened);
-        if !prefs.enabled || prefs.volume <= 0.0 || silenced || prefs.disabled.contains(&cue) {
+        if self.deafened() && !matches!(cue, Cue::Deafened | Cue::Undeafened) {
             return false;
         }
+        let Some(sound) = settings.call_sounds.sound(cue) else {
+            return false;
+        };
         let mut mixer = lock(&self.shared().mixer);
         let now = Instant::now();
         if mixer.cue_until.is_some_and(|until| until <= now) {
@@ -887,14 +895,16 @@ impl Audio {
         if mixer.cues.len() >= RATE as usize / 2 {
             return false;
         }
-        mixer.cues.extend(cue.samples(RATE, prefs.volume));
+        mixer.cues.extend(sound);
         // A ring is longer, and these two may first have to open the speakers.
-        let secs = if matches!(cue, Cue::Ring | Cue::Message) {
-            2
+        let secs = if matches!(cue, Cue::Ring | Cue::Message | Cue::Poked) {
+            2.0
         } else {
-            1
+            1.0
         };
-        mixer.cue_until = Some(now + Duration::from_secs(secs));
+        // Voice lines can run longer than a chime, so the wait starts after what is queued.
+        let queued = mixer.cues.len() as f32 / RATE as f32;
+        mixer.cue_until = Some(now + Duration::from_secs_f32(queued + secs));
         true
     }
 
@@ -906,7 +916,16 @@ impl Audio {
 
     /// Chime for a new message, also outside a call. False when the sound settings keep it quiet.
     pub fn message(&self) -> bool {
-        let played = self.play_cue(Cue::Message);
+        self.alert(Cue::Message)
+    }
+
+    /// Chime for a poke, also outside a call. False when the sound settings keep it quiet.
+    pub fn poke(&self) -> bool {
+        self.alert(Cue::Poked)
+    }
+
+    fn alert(&self, cue: Cue) -> bool {
+        let played = self.play_cue(cue);
         self.refresh();
         played
     }

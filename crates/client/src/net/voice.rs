@@ -1366,6 +1366,11 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                 let Some(person) = ids.get(video.participant.as_str()) else {
                     continue;
                 };
+                if *person != me
+                    && matches!(video.source, TrackSource::Screenshare | TrackSource::Camera)
+                {
+                    sounds.streams.insert(video.sid.clone());
+                }
                 match video.source {
                     TrackSource::Screenshare => screens.entry(*person).or_default().push(Screen {
                         sid: video.sid.to_string(),

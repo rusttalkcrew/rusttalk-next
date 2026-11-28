@@ -15,6 +15,7 @@ Third-party material bundled with RustTalk keeps its own license:
 - Twemoji graphics by Twitter, Inc. and other contributors, CC BY 4.0 (crates/client/assets/emoji/TWEMOJI-LICENSE.txt)
 - Emojibase data, MIT (crates/client/assets/emoji/EMOJIBASE-LICENSE.txt)
 - nsfw_model MobileNetV2 picture model by the nsfw_model Developers, MIT, weights stored as int8 (crates/client/assets/sensitive/NSFW-MODEL-LICENSE.txt)
+- Voice announcements spoken by the Kokoro-82M text-to-speech model by hexgrad, Apache-2.0, rendered to Ogg files (crates/client/assets/voice/, see docs/voice-packs.md)
 - zip crate (reads emoji pack archives), MIT
 
 Chat Markdown and bundled syntax highlighting:

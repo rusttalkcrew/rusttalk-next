@@ -1,0 +1,37 @@
+# English voice pack spoken by the Kokoro voice "af_heart". Each line under
+# [lines] is one call sound (its `Cue` name in snake_case) and the words
+# spoken for it. Render with ../render.py; see docs/voice-packs.md.
+
+[voice]
+# Kokoro voice name and language code ("a" American, "b" British English).
+voice = "af_heart"
+lang = "a"
+speed = 1.0
+# The Kokoro-82M model revision on Hugging Face these files were rendered with.
+model_revision = "f3ff3571791e39611d31c381e3a41a3af07b4987"
+
+[lines]
+you_joined = "Connected"
+you_left = "Disconnected"
+channel_changed = "Channel changed"
+listen_only = "Connected, listen only"
+dropped = "You were disconnected"
+reconnecting = "Reconnecting"
+reconnected = "Reconnected"
+server_muted = "Muted by a moderator"
+server_unmuted = "Unmuted by a moderator"
+peer_joined = "User joined your channel"
+peer_left = "User left your channel"
+friend_joined = "Friend joined your channel"
+stream_started = "Stream started"
+stream_stopped = "Stream stopped"
+peer_stream_started = "Someone started streaming"
+viewer_started = "Someone is watching your stream"
+viewer_stopped = "Someone stopped watching"
+deafened = "Deafened"
+undeafened = "Undeafened"
+muted = "Muted"
+unmuted = "Unmuted"
+ring = "Voice request"
+message = "New message"
+poked = "Hey, wake up!"

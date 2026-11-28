@@ -964,6 +964,19 @@ fn call_sounds(ui: &mut Ui, prefs: &mut crate::sounds::Preferences) {
                 egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), label)
             });
         });
+        let label = t!("sounds.voice");
+        ui::setting_row(ui, label, t!("sounds.voice_help"), |ui| {
+            let combo = ComboBox::from_id_salt("voice-pack")
+                .selected_text(prefs.voice.label())
+                .show_ui(ui, |ui| {
+                    for pack in crate::sounds::VoicePack::ALL {
+                        ui.selectable_value(&mut prefs.voice, pack, pack.label());
+                    }
+                });
+            combo
+                .response
+                .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, ui.is_enabled(), label));
+        });
         for cue in crate::sounds::Cue::ALL {
             let mut enabled = !prefs.disabled.contains(&cue);
             if ui::toggle_row(ui, &mut enabled, cue.label(), "").changed() {

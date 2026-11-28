@@ -53,6 +53,7 @@ use crate::{
         Body, Channel, ChannelKind, Chat, CustomEmoji, Directory, Id, Member, Msg, Picture, Server,
         Status, member_name,
     },
+    sounds::Cue,
     sticker_files::{self, Inline, Kind},
     ui::{self, Item, Look, Palette, error_text},
 };
@@ -1301,6 +1302,26 @@ impl Home {
             .position(|server| &server.address == address)
     }
 
+    /// A moderator muting or unmuting this person during a connected call.
+    fn server_mute_sound(&mut self) {
+        let connected = (self.voice.call.as_ref())
+            .is_some_and(|call| call.state == crate::server::CallState::Connected);
+        if !connected {
+            return;
+        }
+        let muted = user_bar::server_muted(self);
+        if let Some(before) = self.voice.server_muted.replace(muted)
+            && before != muted
+        {
+            let cue = if muted {
+                Cue::ServerMuted
+            } else {
+                Cue::ServerUnmuted
+            };
+            self.voice.audio.play_cue(cue);
+        }
+    }
+
     fn apply(&mut self, ctx: &egui::Context, update: Update, now: f64) {
         // While a server is previewed, what replaces its directory lands on the real one,
         // and the preview is made again from it.
@@ -1315,6 +1336,7 @@ impl Home {
             _ => None,
         };
         self.apply_update(ctx, update, now);
+        self.server_mute_sound();
         if let Some((address, roles)) = lifted
             && let Some(index) = self.index(&address)
             && !matches!(self.servers[index].status, Status::Stopped(_))
@@ -1837,11 +1859,17 @@ impl Home {
                         let was_reconnecting = call.state == crate::server::CallState::Reconnecting;
                         call.state = state;
                         if state == crate::server::CallState::Reconnecting {
+                            if !was_reconnecting {
+                                self.voice.audio.play_cue(Cue::Reconnecting);
+                            }
                             self.voice.sounds.reconnecting();
                             if let Some(watching) = &mut self.voice.watching {
                                 watching.grace_until = None;
                             }
-                        } else if was_reconnecting
+                        } else if was_reconnecting && state == crate::server::CallState::Connected {
+                            self.voice.audio.play_cue(Cue::Reconnected);
+                        }
+                        if was_reconnecting
                             && state == crate::server::CallState::Connected
                             && let Some(watching) = &mut self.voice.watching
                         {
@@ -1851,7 +1879,11 @@ impl Home {
                             );
                         }
                     }
-                    None => self.voice.end_call(),
+                    None => {
+                        // Not this person's own leave: that already let the call go.
+                        self.voice.sounds.dropped();
+                        self.voice.end_call();
+                    }
                 }
             }
             Update::VideoReplaced(address, channel, old, new) => {
@@ -1870,6 +1902,9 @@ impl Home {
                     && call.channel == channel
                 {
                     call.can_talk = can_talk;
+                    if !can_talk {
+                        self.voice.sounds.listen_only();
+                    }
                 }
             }
             Update::VoiceMoved(address, from, to) => {
@@ -1882,6 +1917,11 @@ impl Home {
                     .is_none_or(|call| call.server == address && call.channel == from)
                     && self.servers[index].is_voice(&to)
                 {
+                    if self.voice.call.is_none() {
+                        // The server already ended the old call: not a disconnect, a move.
+                        self.voice.audio.drop_cues();
+                        self.voice.sounds.moved();
+                    }
                     call::join(self, index, to);
                     let name = (self.servers[index].channel(&to)).map_or("", |c| c.name.as_str());
                     self.toast = Some((t!("voice.moved", channel = name), now + 6.0));
@@ -1958,7 +1998,9 @@ impl Home {
                             && call.state == crate::server::CallState::Connected
                     })
                 {
-                    for cue in self.voice.sounds.update(snapshot) {
+                    let friends = &self.friends;
+                    let friend = |id: &Id| friends.relation(id) == Relation::Friend;
+                    for cue in self.voice.sounds.update(snapshot, friend) {
                         self.voice.audio.play_cue(cue);
                     }
                 }

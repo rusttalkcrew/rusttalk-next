@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Server settings > Statistics shows owners and admins who is connected, sign-ins, messages, traffic, storage, uptime and memory, refreshed every 2 seconds. Only counts and sizes, no content.
 - Server statistics also show who is in voice, audio and video streams, and traffic split into voice and video and the rest.
 - Server statistics have history charts of traffic and people for the last 5 minutes, hour, 6 hours or 24 hours.
+- Hear call sounds as short spoken announcements instead of chimes: Settings → Sounds → Voice announcements. New sounds for a friend joining, switching channels, joining a listen-only channel, getting disconnected, reconnecting, a moderator muting or unmuting you, someone else starting a stream, and being poked.
 
 ## v0.12.0 - 2026-11-28
 
