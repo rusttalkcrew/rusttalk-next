@@ -53,11 +53,13 @@ pub enum Permission {
     LockDown = 524288,
     /// When banning someone, also remove what they posted in the last hour, day or week.
     RemoveRecentMessages = 1048576,
+    /// Read and act on reports of messages outside DMs (DM reports go to the owner).
+    ReviewReports = 2097152,
     /// See the server's statistics: counts and sizes, never content.
-    ViewServerStats = 2097152,
+    ViewServerStats = 4194304,
 }
 
-const PERMISSIONS: [Permission; 22] = [
+const PERMISSIONS: [Permission; 23] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -79,6 +81,7 @@ const PERMISSIONS: [Permission; 22] = [
     Permission::TimeoutMembers,
     Permission::LockDown,
     Permission::RemoveRecentMessages,
+    Permission::ReviewReports,
     Permission::ViewServerStats,
 ];
 

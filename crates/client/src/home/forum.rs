@@ -1043,6 +1043,13 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         Some(Asked::Pick(_, Pick::TakeDown(id))) => {
             home.dialog = Some(Dialog::TakeDown(index, channel, id, Box::default()));
         }
+        Some(Asked::Pick(_, Pick::Report(id, person))) => {
+            let at = (id, person);
+            if let Some(draft) = super::report::in_channel(index, channel, chat, at, false) {
+                let draft = super::report::open(&home.servers, draft);
+                home.dialog = Some(Dialog::Report(draft));
+            }
+        }
         // The picker shows over the post's answer box, so that opens with it.
         Some(Asked::Pick(post, Pick::AddReaction(id))) if can_post => {
             folds.open.insert(post);

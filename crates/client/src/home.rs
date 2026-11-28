@@ -121,6 +121,7 @@ pub(crate) mod nsfw;
 pub mod person;
 mod pokes;
 pub mod polls;
+pub(crate) mod report;
 pub(crate) mod rows;
 pub(crate) mod slow_mode;
 mod switcher;
@@ -354,6 +355,8 @@ enum Dialog {
     Poke(Id, String),
     /// The owner removes a message for a legal reason: server, channel, message.
     TakeDown(usize, Id, Id, Box<crate::admin::takedown::Form>),
+    /// Report a message to the moderators (or, from a DM, the owner).
+    Report(report::Draft),
 }
 
 pub(crate) enum ChannelEdit {
@@ -1788,6 +1791,18 @@ impl Home {
                 {
                     invite.making = false;
                     invite.link = Some((id, link));
+                }
+            }
+            Update::MessageReported(result) => {
+                let text = result.map_or_else(|text| text, |()| t!("reports.sent").into());
+                self.toast = Some((text, now + 6.0));
+            }
+            Update::ReportRecipients(address, message, found) => {
+                if let Some(Dialog::Report(draft)) = &mut self.dialog
+                    && draft.message == message
+                    && self.servers[draft.server].address == address
+                {
+                    draft.recipients = Some(found);
                 }
             }
             Update::Admin(address, update) => {
@@ -5967,6 +5982,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<fr
         }
         Some(Pick::Profile(index, author, pick)) => person::apply(home, index, author, pick, now),
         Some(Pick::Media(action, media)) => files.media_action(ui.ctx(), action, &media),
+        Some(Pick::Report(id, person)) => {
+            if let Some(draft) = report::draft(servers, at, chat, (id, person)) {
+                *dialog = Some(Dialog::Report(report::open(servers, draft)));
+            }
+        }
         None => {}
     }
     act
@@ -6287,6 +6307,8 @@ enum Pick {
     AddPicture(String, Kind, std::sync::Arc<Vec<u8>>),
     /// Something picked in a picture's menu.
     Media(files::MediaAction, Box<files::Media>),
+    /// Report this message: its ID and sender.
+    Report(Id, Id),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -7223,6 +7245,7 @@ fn message(
             || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel)));
     // The owner may have to remove anything in a channel, for a legal reason.
     let can_take_down = live && dir.perms.owner && !dir.dms.iter().any(|dm| dm.channel == channel);
+    let can_report = live && report::reportable(&msg.body, mine);
     let mut pick = invite;
     if let (Some(trigger), Some((index, profile))) = (&trigger, profile)
         && let Some(action) = person::profile(ui, trigger, &profile, false)
@@ -7292,6 +7315,9 @@ fn message(
         }
         if m.item("🆔", t!("home.copy_message_id")).clicked() {
             m.ui().ctx().copy_text(hex::encode(msg.id));
+        }
+        if can_report && m.danger("⚑", t!("reports.report")).clicked() {
+            pick = Some(Pick::Report(msg.id, msg.person));
         }
         if can_delete || can_take_down {
             m.separator();
@@ -7654,6 +7680,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::TakeDown(..) => t!("takedown.dialog_title").into(),
         Dialog::Leave(index, _) => t!("home.leave_title", server = home.servers[*index].name()),
         Dialog::Poke(person, _) => t!("pokes.poke_title", name = home.peer_name(person)),
+        Dialog::Report(_) => t!("reports.title").into(),
     }
 }
 
@@ -8129,6 +8156,11 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 poke = Some((*person, text));
             }
         }
+        Dialog::Report(draft) => {
+            if let Some(report) = report::dialog(ui, &home.servers, draft, &mut close) {
+                command = Some((draft.server, report));
+            }
+        }
         Dialog::Leave(index, error) => {
             ui.label(t!("home.leave_help"));
             error_text(ui, error.as_deref());
@@ -8159,8 +8191,10 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         command = name.map(|name| (index, Command::SetDisplayName(name)));
     }
     if let Some((index, command)) = command {
+        // Picking another server for a DM report looks its reviewers up, dialog open.
+        let looking_up = matches!(command, Command::ReportRecipients { .. });
         home.servers[index].send(command);
-        close = true;
+        close |= !looking_up;
     }
     if let Some((peer, id)) = delete_dm {
         home.delete_dm(peer, id, ctx.input(|input| input.time));
@@ -8514,6 +8548,7 @@ mod tests {
     mod rate_limits;
     mod reactions;
     mod reply_jump;
+    mod reports;
     mod sensitive;
     mod server_emoji;
     mod server_stats;

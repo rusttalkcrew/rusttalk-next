@@ -1289,7 +1289,7 @@ impl<'a> KeyClient<'a> {
     }
 
     /// Pin the DMs the catalog lists. One pinned to someone else keeps its pin.
-    async fn learn_dms(&mut self) -> Result<()> {
+    pub(super) async fn learn_dms(&mut self) -> Result<()> {
         for channel in self.catalog().await?.channels {
             if channel.kind == "dm"
                 && let Some(peer) = channel.peer.as_deref()
@@ -1301,7 +1301,7 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
-    async fn sync_devices(&mut self) -> Result<()> {
+    pub(super) async fn sync_devices(&mut self) -> Result<()> {
         let listed: Vec<MemberDevice> = self
             .request(Method::GET, "/v1/member-devices")
             .send()

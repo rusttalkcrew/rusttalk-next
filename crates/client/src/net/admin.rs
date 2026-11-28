@@ -132,6 +132,31 @@ pub enum Admin {
     /// Changes saved together, one after another in this order. The server reloads once
     /// after the last, and one reply says how it went.
     Batch(Vec<Admin>),
+    /// The open reports this person reviews.
+    LoadReports,
+    /// Dismiss every open channel report by this member, or (`true`, the owner) every
+    /// DM report.
+    DismissFrom(Id, bool),
+    /// Act on a report about `sender`'s message, then close it. `files` are the stored
+    /// files of the verified message, deleted with it.
+    HandleReport {
+        id: Id,
+        sender: Id,
+        action: ReportAction,
+        files: Vec<Id>,
+    },
+}
+
+/// What a reviewer does about a report.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReportAction {
+    Dismiss,
+    /// Delete the reported message.
+    Delete,
+    /// Time the sender out for this many seconds.
+    Timeout(i64),
+    Kick,
+    Ban,
 }
 
 /// One picture of an imported pack, as read from the file.
@@ -224,6 +249,8 @@ pub enum AdminUpdate {
     Bans(Vec<Ban>),
     /// Newest first.
     Takedowns(Vec<Takedown>),
+    /// The open reports, oldest first, each verified here.
+    Reports(Vec<rusttalk_core::client::ReceivedReport>),
     /// Newest first; `older` continues the list. `next` asks for the page after it.
     Audit {
         entries: Vec<AuditEntry>,
@@ -497,6 +524,45 @@ async fn change(
             call(client, Method::POST, "/v1/takedowns", Some(body))
                 .await
                 .map(|()| t!("takedown.done"))
+        }
+        Admin::LoadReports => {
+            send(match client.reports().await {
+                Ok(list) => AdminUpdate::Reports(list),
+                Err(error) => AdminUpdate::Failed(failed(&error)),
+            });
+            return None;
+        }
+        Admin::DismissFrom(reporter, dm) => {
+            let result = (client.dismiss_reports_from(&reporter, dm).await)
+                .map(|closed| match closed {
+                    // Nothing the button counted was left (say, handled meanwhile).
+                    0 => t!("reports.none_dismissed"),
+                    _ => t!("reports.done_dismissed_all"),
+                })
+                .map_err(|error| failed(&error));
+            match client.reports().await {
+                Ok(list) => send(AdminUpdate::Reports(list)),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "reloading reports failed")
+                }
+            }
+            result
+        }
+        Admin::HandleReport {
+            id,
+            sender,
+            action,
+            files,
+        } => {
+            let result = handle_report(client, id, sender, action, &files).await;
+            // An action closes other reports of that message, and others may have acted.
+            match client.reports().await {
+                Ok(list) => send(AdminUpdate::Reports(list)),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "reloading reports failed")
+                }
+            }
+            result
         }
         Admin::Invites => {
             match invites(client).await {
@@ -1187,7 +1253,7 @@ fn name_ct(client: &KeyClient<'_>, id: &str, name: &str) -> Result<String, Strin
         })
 }
 
-fn failed(error: &anyhow::Error) -> String {
+pub(super) fn failed(error: &anyhow::Error) -> String {
     tracing::warn!(error = %format_args!("{error:#}"), "server settings request failed");
     match error
         .downcast_ref::<reqwest::Error>()
@@ -1196,6 +1262,58 @@ fn failed(error: &anyhow::Error) -> String {
         Some(reqwest::StatusCode::FORBIDDEN) => t!("admin.no_permission").into(),
         _ => t!("admin.failed").into(),
     }
+}
+
+/// A timeout, kick or ban through its usual request (which checks rank), then close the
+/// report with it; or delete the message or dismiss the report.
+async fn handle_report(
+    client: &KeyClient<'_>,
+    id: Id,
+    sender: Id,
+    action: ReportAction,
+    files: &[Id],
+) -> Result<&'static str, String> {
+    use rusttalk_core::reports::Resolution;
+    let person = encode(&sender);
+    let files: Vec<String> = match action {
+        ReportAction::Delete => files.iter().map(|file| encode(file)).collect(),
+        _ => Vec::new(),
+    };
+    let (first, resolution, done) = match action {
+        ReportAction::Dismiss => (None, Resolution::Dismissed, t!("reports.done_dismissed")),
+        ReportAction::Delete => (None, Resolution::Deleted, t!("reports.done_deleted")),
+        ReportAction::Timeout(seconds) => (
+            Some((
+                Method::PUT,
+                format!("/v1/members/{person}/timeout"),
+                Some(json!({ "seconds": seconds })),
+            )),
+            Resolution::TimedOut,
+            t!("timeout.done"),
+        ),
+        ReportAction::Kick => (
+            Some((Method::DELETE, format!("/v1/members/{person}"), None)),
+            Resolution::Kicked,
+            t!("admin.done_kicked"),
+        ),
+        ReportAction::Ban => (
+            Some((
+                Method::PUT,
+                format!("/v1/bans/{person}"),
+                Some(json!({ "ban_ip": false })),
+            )),
+            Resolution::Banned,
+            t!("admin.done_banned"),
+        ),
+    };
+    if let Some((method, path, body)) = first {
+        call(client, method, &path, body).await?;
+    }
+    client
+        .resolve_report(&id, resolution, &files)
+        .await
+        .map(|()| done)
+        .map_err(|error| failed(&error))
 }
 
 /// Send a request and turn a refusal into plain words.

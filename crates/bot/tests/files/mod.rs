@@ -512,7 +512,7 @@ async fn takedown(
 }
 
 /// Upload a small file and share it to the channel's file list.
-pub(super) async fn share(client: &KeyClient<'_>, channel: &[u8; 32]) -> Result<[u8; 32]> {
+pub(super) async fn share(client: &mut KeyClient<'_>, channel: &[u8; 32]) -> Result<[u8; 32]> {
     let (file, _) = prepare_file("shared.bin", "application/octet-stream", b"shared", &[])?;
     client
         .upload_prepared(channel, &file, b"shared", None, None)

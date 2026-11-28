@@ -200,6 +200,7 @@ pub async fn create(
     )
     .await?;
     reserve(&mut tx, &id).await?;
+    reserve_nonce(&mut tx, &channel, epoch, &envelope_bytes).await?;
     // Last, so a message refused for another reason doesn't start a wait.
     slow_mode::check(&mut tx, &actor, &channel, follow_up).await?;
     let size = envelope_bytes.len();
@@ -370,6 +371,35 @@ pub(crate) async fn trim(
     Ok(dropped)
 }
 
+/// The first 16 nonce bytes pick a record's XChaCha20 subkey, the key a report discloses
+/// (see `reports`). Refuse a second message or shared file with the same ones in one
+/// channel epoch, so a disclosed key never opens another record. Called after the
+/// signature check, so only verified framing gets here.
+pub(crate) async fn reserve_nonce(
+    db: &mut SqliteConnection,
+    channel: &str,
+    epoch: i64,
+    envelope: &[u8],
+) -> ApiResult<()> {
+    let prefix = envelope
+        .get(1..17)
+        .ok_or(ApiError::bad_request("invalid_envelope"))?;
+    let added = query(
+        "INSERT INTO nonce_prefixes (channel_id, epoch, prefix) VALUES (?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(channel)
+    .bind(epoch)
+    .bind(prefix)
+    .execute(db)
+    .await?
+    .rows_affected();
+    if added == 0 {
+        return Err(keys::conflict("nonce_reused"));
+    }
+    Ok(())
+}
+
 pub(crate) async fn uncount(
     db: &mut SqliteConnection,
     channel: &str,
@@ -510,35 +540,49 @@ pub async fn delete(
             .await?
             .require(Permission::DeleteMessages)?;
     }
+    remove(&app, &mut tx, &actor, &channel, &id, &kind).await?;
+    tx.commit().await?;
+    app.notify(Event::MessageDeleted { channel, id });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove a message the actor may remove, and audit it. The caller commits and then
+/// sends `message_deleted`.
+pub(crate) async fn remove(
+    app: &App,
+    tx: &mut SqliteConnection,
+    actor: &Actor,
+    channel: &str,
+    id: &str,
+    kind: &str,
+) -> ApiResult<()> {
     let removed = query("DELETE FROM messages WHERE channel_id = ? AND id = ?")
-        .bind(&channel)
-        .bind(&id)
+        .bind(channel)
+        .bind(id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    uncount(&mut tx, &channel, removed).await?;
+    uncount(&mut *tx, channel, removed).await?;
     let audit_id = audit(
-        &mut tx,
+        &mut *tx,
         &actor.person,
         "message_deleted",
         None,
-        Some(&id),
+        Some(id),
         actor.at,
     )
     .await?;
     if kind == "dm" {
         query("UPDATE audit_log SET dm_channel_id = ? WHERE id = ?")
-            .bind(&channel)
+            .bind(channel)
             .bind(audit_id)
             .execute(&mut *tx)
             .await?;
     }
-    if page_files::is_page(&mut tx, &channel).await? {
-        page_files::refresh(&app, &mut tx, &channel).await?;
+    if page_files::is_page(&mut *tx, channel).await? {
+        page_files::refresh(app, &mut *tx, channel).await?;
     }
-    tx.commit().await?;
-    app.notify(Event::MessageDeleted { channel, id });
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 const _: () = assert!(BODY_LIMIT == 20_104);

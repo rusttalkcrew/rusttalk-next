@@ -46,7 +46,7 @@ const OPENS: bool = SAVE_DIALOG;
 
 /// Phones: the button that hands a stored file to the system instead of a save
 /// dialog (`Files::export`). Android saves it to Downloads, iOS opens the share sheet.
-fn export_label() -> Option<&'static str> {
+pub(crate) fn export_label() -> Option<&'static str> {
     if cfg!(target_os = "android") {
         Some(t!("files.save_to_phone"))
     } else if cfg!(target_os = "ios") {
@@ -454,7 +454,15 @@ impl Files {
     ) {
         if OPENS {
             self.open_file(commands, file);
-        } else if export_label().is_some() {
+        } else {
+            self.save_as_asked(ctx, address, file);
+        }
+    }
+
+    /// Save a file: on phones through the system's share or save sheet, elsewhere with a
+    /// save dialog.
+    pub fn save_as_asked(&mut self, ctx: &egui::Context, address: &Url, file: &Attachment) {
+        if export_label().is_some() {
             self.export(ctx, address, file);
         } else if SAVE_DIALOG {
             self.ask(ctx, Ask::Save(address.clone(), file.clone()));

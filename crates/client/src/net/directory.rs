@@ -195,6 +195,42 @@ pub(super) struct Sources {
     emoji: Value,
 }
 
+/// Who this app shows as the owner and as holding `review_reports`, from the last member
+/// list and roles: the only people a report may go to (see `KeyClient::report`). `None`
+/// before any directory loaded.
+pub(super) fn visible_reviewers(state: &State) -> Option<rusttalk_core::client::Visible> {
+    state.raw.as_ref().map(visible_in)
+}
+
+fn visible_in(sources: &Sources) -> rusttalk_core::client::Visible {
+    let mut visible = rusttalk_core::client::Visible::default();
+    let reviewing: HashSet<&str> = (sources.roles["roles"].as_array().into_iter().flatten())
+        .filter(|role| {
+            (role["permissions"].as_array().into_iter().flatten())
+                .any(|permission| permission == "review_reports")
+        })
+        .filter_map(|role| role["id"].as_str())
+        .collect();
+    for row in sources.members.as_array().into_iter().flatten() {
+        let Some(person) = (row["person_id"].as_str()).and_then(|id| decode::<32>(id).ok()) else {
+            continue;
+        };
+        let roles = row["role_ids"].as_array().into_iter().flatten();
+        for role in roles.filter_map(Value::as_str) {
+            // A server has one owner. A second (say, a hidden member given the role)
+            // stops reports until it's sorted, rather than picking one.
+            if role == "owner" {
+                visible.several_owners |= visible.owner.is_some_and(|owner| owner != person);
+                visible.owner.get_or_insert(person);
+            }
+            if reviewing.contains(role) {
+                visible.reviewers.insert(person);
+            }
+        }
+    }
+    visible
+}
+
 /// Fetch and decrypt names, channels, members and permissions, and report member changes.
 pub(super) async fn directory(
     ctx: &Ctx,
@@ -259,25 +295,38 @@ pub(super) async fn reload(
     state: &mut State,
     part: Part,
 ) -> Result<()> {
-    // Taken while loading, so a failed load leaves none and the next notice loads it all.
     let Some(mut sources) = state.raw.take() else {
         return directory(ctx, url, client, state).await;
     };
+    if matches!(part, Part::Other) {
+        // Kept should the full load fail, so reports still see the last members and roles.
+        state.raw = Some(sources);
+        return directory(ctx, url, client, state).await;
+    }
     let mut calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
     let mut lockdown_now = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
-    match part {
-        Part::Channels => {
-            sources.catalog = client.catalog().await?;
-            discard_unreadable(ctx, url, state, &sources.catalog);
-            if manages_channels(&sources.me, &sources.roles) {
-                sources.catalog.categories = managed_categories(client).await?;
+    let fetched: Result<()> = async {
+        match part {
+            Part::Channels => {
+                sources.catalog = client.catalog().await?;
+                discard_unreadable(ctx, url, state, &sources.catalog);
+                if manages_channels(&sources.me, &sources.roles) {
+                    sources.catalog.categories = managed_categories(client).await?;
+                }
             }
+            Part::Space => sources.space = get(client, "/v1/space").await?,
+            Part::Emoji => sources.emoji = emoji_list(client).await?,
+            Part::Calendar => calendar = super::calendar::load(client).await?,
+            Part::Lockdown => lockdown_now = lockdown(client, &sources.me, &sources.roles).await?,
+            Part::Other => unreachable!("loaded in full above"),
         }
-        Part::Space => sources.space = get(client, "/v1/space").await?,
-        Part::Emoji => sources.emoji = emoji_list(client).await?,
-        Part::Calendar => calendar = super::calendar::load(client).await?,
-        Part::Lockdown => lockdown_now = lockdown(client, &sources.me, &sources.roles).await?,
-        Part::Other => return directory(ctx, url, client, state).await,
+        Ok(())
+    }
+    .await;
+    // A failed fetch keeps the last sources (see `rebuild`).
+    if let Err(error) = fetched {
+        state.raw = Some(sources);
+        return Err(error);
     }
     rebuild(ctx, url, client, state, sources, calendar, lockdown_now).await
 }
@@ -299,11 +348,19 @@ pub(super) async fn profile(
     // A timeout put on or ended: `/v1/me` has its reason for the banner.
     let timeout_changed = own && sources.me["timeout_until"].as_i64() != profile.timeout_until;
     if !patch_profile(&mut sources, person, profile, own) {
-        // Not listed yet: a member this directory doesn't know, so load it all.
+        // Not listed yet: a member this directory doesn't know, so load it all, keeping
+        // the last sources should that fail (see `rebuild`).
+        state.raw = Some(sources);
         return directory(ctx, url, client, state).await;
     }
     if timeout_changed {
-        sources.me = get(client, "/v1/me").await?;
+        match get(client, "/v1/me").await {
+            Ok(me) => sources.me = me,
+            Err(error) => {
+                state.raw = Some(sources);
+                return Err(error);
+            }
+        }
     }
     let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
     let lockdown = state.last.as_ref().and_then(|dir| dir.lockdown.clone());
@@ -419,18 +476,30 @@ async fn rebuild(
     });
     // Shown with the pictures already decoded; the serve loop loads the rest when idle,
     // from the disk cache or the server.
-    let (pictures, _, _) =
-        known_pictures(client.space().id, members, space, emoji, &state.pictures)?;
-    let mut dir = build(
-        client,
-        catalog,
-        members,
-        me,
-        roles,
-        space,
-        emoji,
-        &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
-    )?;
+    let built = (|| -> Result<_> {
+        let (pictures, _, _) =
+            known_pictures(client.space().id, members, space, emoji, &state.pictures)?;
+        let dir = build(
+            client,
+            catalog,
+            members,
+            me,
+            roles,
+            space,
+            emoji,
+            &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
+        )?;
+        Ok((dir, pictures))
+    })();
+    // Whatever fails, the last sources stay: reports check their recipients against the
+    // members and roles in them (see `visible_reviewers`).
+    let (mut dir, pictures) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            state.raw = Some(sources);
+            return Err(error);
+        }
+    };
     // A DM channel stays with the person it was first listed with. One the server
     // now lists with someone else is not shown, so nothing is sent there.
     dir.dms.retain(|dm| {
@@ -503,6 +572,7 @@ async fn rebuild(
     super::recent::Listing::save(state, &dir, members, space);
     state.avatar_uninitialized =
         own_avatar_uninitialized(members, ctx.identity.certificate.person_id());
+    super::reports::pin_first_owner(&ctx.data, &state.server_id, &visible_in(&sources));
     state.raw = Some(sources);
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
@@ -604,6 +674,7 @@ fn build(
                     "bypass_slow_mode" => perms.bypass_slow_mode = true,
                     "lock_down" => perms.lock_down = true,
                     "remove_recent_messages" => perms.remove_recent_messages = true,
+                    "review_reports" => perms.review_reports = true,
                     "view_server_stats" => perms.stats = true,
                     _ => {}
                 }
@@ -1088,6 +1159,43 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_recipients_come_from_the_shown_roles_and_one_owner() {
+        let row = |person: u8, roles: &[&str]| json!({"person_id": encode(&[person; 32]), "role_ids": roles, "hide_offline": true});
+        let sources = |members: Value| Sources {
+            catalog: Catalog {
+                channels: Vec::new(),
+                categories: Vec::new(),
+            },
+            members,
+            me: Value::Null,
+            roles: json!({"roles": [
+                {"id": "owner", "permissions": ["review_reports"]},
+                {"id": "moderator", "permissions": ["kick", "review_reports"]},
+                {"id": "member", "permissions": []},
+            ]}),
+            space: Value::Null,
+            emoji: Value::Null,
+        };
+        let shown = visible_in(&sources(json!([
+            row(1, &["owner"]),
+            row(2, &["moderator"]),
+            row(3, &["member"]),
+        ])));
+        assert_eq!(shown.owner, Some([1; 32]));
+        assert!(!shown.several_owners);
+        assert!(shown.reviewers.contains(&[2; 32]) && !shown.reviewers.contains(&[3; 32]));
+        // A second member listed as owner, wherever in the list, stops reports (H2).
+        let doubled = visible_in(&sources(json!([
+            row(1, &["owner"]),
+            row(2, &["moderator"]),
+            row(9, &["owner"]),
+        ])));
+        assert!(doubled.several_owners);
+        let report = rusttalk_core::client::check_reviewers(true, &[[1; 32]], &doubled);
+        assert!(report.is_err());
+    }
 
     #[test]
     fn only_new_pictures_are_left_to_fetch() -> Result<()> {

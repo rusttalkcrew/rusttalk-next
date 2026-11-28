@@ -43,6 +43,8 @@ pub enum Action {
     NewDm,
     Invite,
     Presence,
+    /// Reporting a message to the moderators.
+    Report,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +70,8 @@ const fn standard(action: Option<Action>) -> Rate {
         Some(Action::NewDm) => (10.0, 10.0 / HOUR),
         Some(Action::Invite) => (20.0, 20.0 / HOUR),
         Some(Action::Presence) => (5.0, 1.0),
+        // A handful of reports at once, as in a spam wave, then one every few minutes.
+        Some(Action::Report) => (10.0, 20.0 / HOUR),
         // Every authenticated request of one session. A cold start fetches every avatar
         // and emoji picture at once.
         None => (300.0, 30.0),

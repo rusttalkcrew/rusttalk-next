@@ -757,16 +757,26 @@ pub async fn audit_log(
         .require(Permission::ViewAuditLog)?;
     let rows = query_as::<_, AuditRow>(&format!(
         "SELECT id, actor_person_id, action, target_person_id, target_id, details, at
-                                       FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?)
+                                       FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?
+                                           -- The Reports filter covers DM reports too.
+                                           OR (? = 'report_resolved' AND action IN ('dm_report_resolved', 'reports_dismissed',
+                                               'dm_reports_dismissed')))
                                        AND (dm_channel_id IS NULL OR EXISTS (
                                            SELECT 1 FROM channel_readers r
                                            WHERE r.channel_id = dm_channel_id AND r.person_id = ?
+                                       ))
+                                       -- DM reports are the owner's alone.
+                                       AND (action NOT IN ('dm_report_resolved', 'dm_reports_dismissed') OR EXISTS (
+                                           SELECT 1 FROM server_settings
+                                           WHERE id = 1 AND owner_person_id = ?
                                        )) ORDER BY id {order} LIMIT ?"
     ))
     .bind(after)
     .bind(before.unwrap_or(i64::MAX))
     .bind(&action)
     .bind(&action)
+    .bind(&action)
+    .bind(actor.person.as_slice())
     .bind(actor.person.as_slice())
     .bind(limit)
     .fetch_all(&mut *tx)
@@ -941,7 +951,7 @@ mod tests {
             (6, true),
             (7, true),
         ] {
-            let mut tx = app.db.begin().await?;
+            let mut tx = crate::store::write(&app.db).await?;
             let result =
                 crate::auth::redeem(&mut tx, &person(100 + byte), &code(byte), now()?).await;
             match result {
@@ -958,7 +968,7 @@ mod tests {
             .bind(person(5))
             .execute(&app.db)
             .await?;
-        let mut tx = app.db.begin().await?;
+        let mut tx = crate::store::write(&app.db).await?;
         crate::auth::redeem(&mut tx, &person(105), &code(5), now()?).await?;
         Ok(())
     }
@@ -970,7 +980,7 @@ mod tests {
         let code = crate::auth::owner_invite(&db)
             .await?
             .expect("owner pending");
-        let mut tx = db.begin().await?;
+        let mut tx = crate::store::write(&db).await?;
         crate::auth::redeem(&mut tx, &person(1), &code, now()?).await?;
         tx.commit().await?;
         assert!(!crate::auth::owner_pending(&db).await?);
