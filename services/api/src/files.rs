@@ -353,7 +353,12 @@ pub async fn download(
         }
     })?;
     let row = lookup(&mut tx, &id, actor.at).await?;
-    messages::chat_kind(&mut tx, &actor, &row.channel_id).await?;
+    // A reviewer may download the files of a reported message without reading its channel.
+    if let Err(error) = messages::chat_kind(&mut tx, &actor, &row.channel_id).await
+        && !crate::reports::may_download(&mut tx, &actor, &id).await?
+    {
+        return Err(error);
+    }
     let blob = fs::File::open(app.files.dir.join(&id))
         .await
         .map_err(|error| {
@@ -489,6 +494,7 @@ pub async fn share(
         &envelope,
     )
     .await?;
+    messages::reserve_nonce(&mut tx, &channel, epoch, &envelope).await?;
     let shared = query(
         "INSERT INTO shared_files (id, epoch, sender_device, sender_person, at, envelope)
          VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",

@@ -28,6 +28,7 @@ pub mod pinned_tls;
 #[cfg(all(target_os = "linux", any(feature = "capture", feature = "voice")))]
 mod pipewire_helper;
 pub mod presence;
+pub mod reports;
 #[cfg(feature = "client")]
 pub mod route;
 #[cfg(feature = "voice")]

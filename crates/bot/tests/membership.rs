@@ -467,7 +467,7 @@ async fn docker_keys(
             assert!(sibling_keys.key(scope, epoch) == c.key(scope, epoch));
         }
     }
-    let sibling_file = files::share(&sibling_keys, &channel.id).await?;
+    let sibling_file = files::share(&mut sibling_keys, &channel.id).await?;
     assert_eq!(files::shared_records(a, &channel.id).await?.len(), 1);
     let revoked = revoke_device(
         &c_words,
@@ -542,7 +542,7 @@ async fn docker_keys(
     a.sync().await?;
     wait_for_device(a, &encode(d_identity.certificate.signing_key().as_bytes())).await?;
     receive_key(&mut d, leave_files, 1).await?;
-    let d_file = files::share(&d, &leave_files.id).await?;
+    let d_file = files::share(&mut d, &leave_files.id).await?;
     assert_eq!(files::shared_records(a, &leave_files.id).await?.len(), 1);
     rejected(
         a.request(Method::DELETE, "/v1/me/membership")

@@ -1704,7 +1704,7 @@ mod tests {
         assert_eq!(code(update(1, 22, 30).await), "not_a_text_channel");
 
         // Saved and audited with what changed; saving the same value again logs nothing.
-        let mut tx = app.db.begin().await?;
+        let mut tx = crate::store::write(&app.db).await?;
         let owner = crate::auth::Actor {
             person: [1; 32],
             device: vec![1],
@@ -1773,7 +1773,7 @@ mod tests {
 
         // Saved and audited with what changed; saving the same value again logs nothing.
         // Pages may be marked too; only marked channels say so in the list.
-        let mut tx = app.db.begin().await?;
+        let mut tx = crate::store::write(&app.db).await?;
         let owner = crate::auth::Actor {
             person: [1; 32],
             device: vec![1],

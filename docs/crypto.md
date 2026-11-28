@@ -642,6 +642,136 @@ file: the API and readers check each with its own label, and the signature and
 tag fail under the other. Readers accept the record only when it holds that one
 file, without a thumbnail, and nothing else.
 
+## Reports
+
+A member can report a message they can read (see
+[Protocol](protocol.md#reports)). The reviewers (members with `review_reports`
+and the owner; for a DM only the owner) can check that the reported content
+really came from its sender, and learn nothing else.
+
+**What is signed.** A message's device signature covers the associated data
+(server, channel, epoch, message ID, sender device and person) followed by the
+envelope version, nonce, ciphertext length and ciphertext with its tag (see
+Messages). It covers the ciphertext, not the plaintext. A reviewer therefore
+needs a key that opens exactly that ciphertext, and must see what it opens to.
+
+**The message key.** Messages are sealed with the channel epoch key, which
+opens every message of that epoch, so it is never disclosed. XChaCha20-Poly1305
+is ChaCha20-Poly1305 under the subkey `HChaCha20(epoch key, nonce[0..16])` with
+the nonce `0x00000000 || nonce[16..24]`. The reporter discloses that 32-byte
+subkey. The nonce is random per message and HChaCha20 is a PRF, so the subkey
+opens only this envelope and reveals nothing about the epoch key or any other
+message. The reporter's app verifies the envelope and checks that the subkey
+opens it before disclosing it. The message plaintext carries the keys, names
+and media types of its own stored files (see Server-stored file encryption),
+so those files and no others become readable.
+
+Two records sealed under one epoch key with the same first 16 nonce bytes would
+share that subkey. Random nonces make this negligible, but a sender could do it
+on purpose. The API therefore refuses a message or shared file whose nonce
+prefix another record of the same channel epoch already used (`409
+nonce_reused`), and keeps the prefixes after records are deleted, so a prefix is
+never reused. Records stored before this rule were added to the same list when
+the server upgraded; a prefix two of them already shared (never expected) is
+marked, and neither record can be reported. As a second line, the reporter's
+app refuses to report a record whose prefix it has seen on another message or
+shared file of that epoch, in either direction and also after the other record
+left its cache.
+
+**Verification.** For each reported envelope a reviewer verifies the sender's
+root-signed device certificate (carried in the report) against the person ID,
+verifies the sender's Ed25519 signature over the associated data and envelope,
+then decrypts with ChaCha20-Poly1305 under the disclosed key and the same
+associated data. A forged or altered envelope fails the signature; a wrong key
+fails the tag. The reporter can't make the sender appear to have said something
+else: they can only sign with their own device. A reviewer who also holds the
+channel's epoch key derives the subkey again: a match confirms it, a mismatch
+marks the report unverified. Without that key, one case remains:
+ChaCha20-Poly1305 is not key-committing, so a sender working together with the
+reporter could craft one ciphertext that opens to different text under two keys.
+That only lets the pair frame the sender themselves; a sender alone can't hide
+what members saw from a reviewer, since the reporter discloses the key every
+reader derives.
+
+**Bound to the stored message.** A device that was removed, or stolen, can
+still sign: on its own the signature can't show that the sender's account ever
+posted the evidence under that message ID. When a report comes in, the server
+reads the reported message (and shown edit) from its own store and records the
+signing device, epoch and SHA-256 of the envelope. Reviewers get these with the
+report and require the evidence to match them exactly, so the evidence must be
+the record the server accepted from a then-valid session. If the signing device
+has since been removed, the app shows a warning instead of "Verified": the
+message may not be the person's own. The server sends the sender's and
+reporter's signed removals it knows with each report, also of people who are no
+longer members; the reviewer checks each against its root, alongside the
+removals its own profile knows.
+
+When the shown message was edited, the report also carries the edit's envelope
+and key. The first record must not be an edit itself. A reviewer accepts the
+second only as a different record that edits (`edit_of`) the reported message,
+in the same channel, by the same person. Edits never change files, so only the
+message's own file references are sent.
+
+**Sealing.** The report plaintext is a version byte (1), the reason byte
+(spam 1, harassment 2, illegal content 3, sexual content involving minors 4,
+other 5), the note's two-byte big-endian UTF-8 length and the note (at most
+500 Unicode scalar values), the reporter's 191-byte public device certificate,
+a count byte (1 or 2), and per message: channel ID, message ID, epoch (8 bytes,
+big endian), sender device, sender person (32 bytes each), the sender's
+191-byte public device certificate, the 32-byte message key, and the envelope
+with a two-byte big-endian length. It is sealed with XChaCha20-Poly1305 under
+a fresh random 32-byte report key and a random 24-byte nonce, with associated
+data
+
+```text
+"rusttalk-report-v1" || server_id (32 bytes) || report_id (32 bytes) ||
+reporter_person (32 bytes) || dm (1 byte: 1 from a DM, else 0)
+```
+
+so a server can't present a DM report as a channel report or the other way
+round. The sealed report is the nonce, a 32-byte key commitment
+`SHA-256("rusttalk-report-commit-v1" || report_key)`, the ciphertext with its
+tag, and the reporter device's 64-byte signature over the associated data
+followed by the nonce, commitment and ciphertext (at most 30,906 bytes in all).
+Each reviewer checks the unwrapped key against the signed commitment, so every
+reviewer's wrap must hold the same key and they all read the same report.
+The report key is wrapped to every reviewer device with RFC 9180 base mode, the
+same suite as key envelopes, empty AAD and HPKE info
+
+```text
+"rusttalk-report-key-v1" || server_id (32 bytes) || report_id (32 bytes) ||
+recipient_Ed25519 (32 bytes)
+```
+
+Each wrap is 80 bytes: the encapsulated key and the sealed report key with its
+tag. Wraps are not signed: a substituted key fails the signed commitment.
+A reviewer unwraps, decrypts, verifies the reporter's certificate against the
+reporter the server lists and the signature, then verifies each message as
+above, and checks that the channel, message, edit and sender the server lists
+match the signed contents, and the stored records match the evidence. A server
+can't relabel a report, move it to another reporter, server or ID, or read it.
+
+**Who it is sealed to.** There is no key that only reviewers hold: every member
+holds the space key, so sealing to it would let any member who obtains the
+ciphertext read reports. The reporter's app instead wraps the report key to the
+verified, not removed device certificates of the people the server names as
+reviewers, like key envelopes, and never to the reported sender unless they are
+the owner. The app first checks that list against what it shows: for a DM the
+owner alone, otherwise the owner and members whose roles it shows with
+`review_reports`; anyone else is refused, and so is a member list with more
+than one owner. Whether the chat is a DM must match this device's DM pins. The
+reporter is shown every recipient by name and fingerprint, hidden
+members too, before sending, and the app points out when the owner differs from
+the one it first saw on this server (pinned with the first member list it loads
+there); a report goes out only while the owner is still the one shown. The server requires the wraps to cover every current device of
+those recipients exactly once; a device the reporter's app knows was removed is
+left out with its signed removal instead. The app refuses to seal to more than
+200 devices, and the role page warns from 150. As everywhere else, the server
+decides roles, so a malicious server can still show a person it controls as a
+reviewer to everyone. People who become reviewers later, and reviewers' devices
+added later, can't read earlier reports. When a report is closed, the server
+deletes its ciphertext and wraps.
+
 ## Media encryption
 
 Before joining, RustTalk derives a 32-byte key with HKDF-SHA256 using
